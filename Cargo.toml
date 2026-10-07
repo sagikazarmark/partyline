@@ -60,6 +60,13 @@ worker = "0.8.7"
 proptest = "1.11"
 wasm-bindgen-test = "0.3"
 
+[workspace.metadata.release]
+sign-commit = true
+sign-tag = true
+shared-version = true
+tag-message = "Release {{version}}"
+tag-name = "v{{version}}"
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
