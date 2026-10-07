@@ -1,0 +1,26 @@
+name = "partyline-chat"
+main = "build/index.js"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "worker-build --release"
+
+[[durable_objects.bindings]]
+name = "CHAT_CHANNEL"
+class_name = "ChatChannel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatChannel"]
+
+# The signing key for session cookies and access tokens: `SESSION_SECRET`, at least 32
+# characters. Local runs read it from .dev.vars (copy .dev.vars.example). To deploy, set it
+# with `npx wrangler secret put SESSION_SECRET`.
+
+# The Dioxus web client. Build it with `dx bundle --package chat-web --platform web --release`
+# from the workspace root and copy target/dx/chat-web/release/web/public here.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/partyline/*"]

@@ -1,0 +1,16 @@
+[package]
+name = "poll-web"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+
+[dependencies]
+poll-shared = { path = "../shared" }
+dioxus = { workspace = true, features = ["web", "launch", "macro", "html", "hooks", "signals", "asset", "document"] }
+gloo-net = { workspace = true, features = ["http", "json"] }
+js-sys.workspace = true
+partyline.workspace = true
+partyline-dioxus.workspace = true
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+web-sys = { workspace = true, features = ["Window", "Location"] }

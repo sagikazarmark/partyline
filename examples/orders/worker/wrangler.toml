@@ -1,0 +1,21 @@
+name = "partyline-orders"
+main = "build/index.js"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "worker-build --release"
+
+[[durable_objects.bindings]]
+name = "ORDER_CHANNEL"
+class_name = "OrderChannel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OrderChannel"]
+
+# The Dioxus web client. Build it with `dx bundle` in ../web and copy the output here.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/partyline/*"]

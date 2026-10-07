@@ -1,0 +1,27 @@
+name = "examples"
+engineVersion = "v1.0.0"
+runtime.source = "dang"
+
+[[dependencies]]
+name = "rust"
+source = "github.com/sagikazarmark/daggerverse-beta/rust"
+
+[[dependencies]]
+name = "dioxus"
+source = "github.com/sagikazarmark/daggerverse-beta/dioxus"
+
+[[dependencies]]
+name = "worker-build"
+source = "github.com/sagikazarmark/daggerverse-beta/worker-build"
+
+[[dependencies]]
+name = "wrangler"
+source = "github.com/sagikazarmark/daggerverse-beta/wrangler"
+
+[[dependencies]]
+name = "wasm-tools"
+source = "github.com/sagikazarmark/daggerverse-beta/wasm-tools"
+
+[[dependencies]]
+name = "cargo-lock"
+source = "github.com/sagikazarmark/daggerverse-beta/cargo-lock"

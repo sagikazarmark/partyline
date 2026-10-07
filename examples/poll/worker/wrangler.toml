@@ -1,0 +1,36 @@
+name = "partyline-poll"
+main = "build/index.js"
+compatibility_date = "2026-09-01"
+
+# The public deployment runs on a custom subdomain, so zone-level rate limiting and
+# firewall rules apply. Uncomment and set the domain to deploy.
+# routes = [{ pattern = "partyline.example.com", custom_domain = true }]
+
+[build]
+command = "worker-build --release"
+
+[[durable_objects.bindings]]
+name = "POLL_OBJECT"
+class_name = "PollObject"
+
+[[durable_objects.bindings]]
+name = "ACTIVITY_CHANNEL"
+class_name = "ActivityChannel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PollObject", "ActivityChannel"]
+
+# At most 20 votes per client IP per 10 seconds.
+[[ratelimits]]
+name = "VOTE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 20, period = 10 }
+
+# The Dioxus web client. Build it with `dx bundle --package poll-web --platform web --release`
+# from the workspace root and copy target/dx/poll-web/release/web/public here.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/partyline/*"]

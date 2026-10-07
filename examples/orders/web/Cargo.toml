@@ -1,0 +1,13 @@
+[package]
+name = "orders-web"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["web", "launch", "macro", "html", "hooks", "signals", "asset", "document"] }
+gloo-net = { workspace = true, features = ["http", "json"] }
+orders-shared = { path = "../shared" }
+partyline.workspace = true
+partyline-dioxus.workspace = true

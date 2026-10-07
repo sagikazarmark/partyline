@@ -1,0 +1,27 @@
+[package]
+name = "partyline-dioxus"
+version.workspace = true
+description = "Dioxus hooks for partyline: sequenced, resumable server events with status as a signal"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["macro", "hooks", "signals"] }
+futures.workspace = true
+partyline.workspace = true
+partyline-client.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+partyline-client = { workspace = true, features = ["web-wake"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time", "sync"] }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "partyline-e2e-fixture"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+description = "A Worker for end-to-end tests: an axum router and a channel with a tiny retention window"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+axum = { version = "0.8", default-features = false }
+partyline.workspace = true
+partyline-worker = { workspace = true, features = ["http"] }
+tower-service = "0.3"
+worker = { workspace = true, features = ["http", "axum"] }

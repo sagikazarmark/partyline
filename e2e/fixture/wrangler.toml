@@ -1,0 +1,14 @@
+name = "partyline-e2e-fixture"
+main = "build/index.js"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "worker-build --release"
+
+[[durable_objects.bindings]]
+name = "TICK_CHANNEL"
+class_name = "TickChannel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TickChannel"]

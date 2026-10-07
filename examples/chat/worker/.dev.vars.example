@@ -1,0 +1,2 @@
+# For local runs only. Copy to .dev.vars. Never deploy this value.
+SESSION_SECRET=local-development-secret-not-for-production

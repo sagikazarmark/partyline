@@ -1,0 +1,29 @@
+[package]
+name = "partyline-worker"
+version.workspace = true
+description = "Cloudflare Durable Object hub for partyline: sequenced, resumable WebSocket events"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+## Adds `Connect::forward_http` for Workers that use `http::Request`, such as axum.
+http = ["worker/http", "dep:http", "dep:http-body", "dep:bytes"]
+
+[dependencies]
+partyline.workspace = true
+serde_json.workspace = true
+worker.workspace = true
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["wasm32-unknown-unknown"]
+
+[lints]
+workspace = true

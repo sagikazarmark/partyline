@@ -1,0 +1,21 @@
+[package]
+name = "partyline"
+version.workspace = true
+description = "Sequenced, resumable server-to-client events: protocol types, sans-IO client state machine, and replay rules"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+[application]
+name = "chat-web"
+
+[web.app]
+title = "partyline chat"

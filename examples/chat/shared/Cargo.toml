@@ -1,0 +1,10 @@
+[package]
+name = "chat-shared"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+
+[dependencies]
+partyline.workspace = true
+serde.workspace = true

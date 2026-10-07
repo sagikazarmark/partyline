@@ -1,0 +1,5 @@
+[application]
+name = "orders-web"
+
+[web.app]
+title = "partyline orders"

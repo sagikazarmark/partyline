@@ -1,0 +1,5 @@
+[application]
+name = "poll-web"
+
+[web.app]
+title = "partyline live poll"

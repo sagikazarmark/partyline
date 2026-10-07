@@ -1,0 +1,10 @@
+ignore = [".devenv", "target"]
+
+[modules.rust]
+source = "github.com/sagikazarmark/daggerverse-beta/rust"
+
+[modules.examples]
+source = ".dagger/modules/examples"
+
+[modules.dagger-gha]
+source = "github.com/sagikazarmark/daggerverse-beta/dagger-gha"
