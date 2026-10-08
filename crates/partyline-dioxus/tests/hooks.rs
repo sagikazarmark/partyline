@@ -4,6 +4,8 @@
 // The handshake callback signature is fixed by tungstenite.
 #![allow(clippy::result_large_err)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,9 +14,10 @@ use dioxus::prelude::*;
 use futures::{SinkExt, StreamExt};
 use partyline::frame::ConnectParams;
 use partyline::server::{self, Log, MemLog, Retention};
-use partyline::{Channel, ClientConfig, Cursor, Mode, Status, codec};
+use partyline::{Channel, ClientConfig, Cursor, Mode, Status, StopReason, codec};
 use partyline_dioxus::{
-    BaseUrl, ChannelMessage, ChannelOptions, use_channel, use_channel_latest, use_channel_reducer,
+    BaseUrl, ChannelMessage, ChannelOptions, UseChannel, use_channel, use_channel_latest,
+    use_channel_reducer,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -40,6 +43,8 @@ struct TestServer {
     log: Arc<Mutex<MemLog>>,
     sockets: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>>,
     connections: Arc<Mutex<usize>>,
+    /// The path and query of every connection.
+    requests: Arc<Mutex<Vec<(String, String)>>>,
     base: String,
 }
 
@@ -51,6 +56,7 @@ impl TestServer {
             log: Arc::new(Mutex::new(MemLog::new(3))),
             sockets: Arc::default(),
             connections: Arc::default(),
+            requests: Arc::default(),
             base: format!("http://{}", listener.local_addr().unwrap()),
         };
         let s = server.clone();
@@ -59,16 +65,20 @@ impl TestServer {
                 let (stream, _) = listener.accept().await.unwrap();
                 let s = s.clone();
                 tokio::spawn(async move {
+                    let mut path = String::new();
                     let mut query = String::new();
                     let callback = |req: &tungstenite::handshake::server::Request, resp| {
+                        path = req.uri().path().to_owned();
                         query = req.uri().query().unwrap_or("").to_owned();
                         Ok(resp)
                     };
-                    let mut ws = tokio_tungstenite::accept_hdr_async(stream, callback)
-                        .await
-                        .unwrap();
+                    let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await
+                    else {
+                        return;
+                    };
                     *s.connections.lock().unwrap() += 1;
                     let cursor = ConnectParams::parse(&query).unwrap().cursor;
+                    s.requests.lock().unwrap().push((path, query));
                     let (tx, mut rx) = mpsc::unbounded_channel();
                     let frames = {
                         let log = s.log.lock().unwrap();
@@ -76,7 +86,9 @@ impl TestServer {
                         server::handshake(s.mode, cursor, &*log).unwrap()
                     };
                     for frame in frames {
-                        ws.send(tungstenite::Message::text(frame)).await.unwrap();
+                        if ws.send(tungstenite::Message::text(frame)).await.is_err() {
+                            return;
+                        }
                     }
                     loop {
                         tokio::select! {
@@ -109,7 +121,11 @@ impl TestServer {
     }
 
     fn options(&self, since: Option<Cursor>) -> ChannelOptions {
-        ChannelOptions::new("c1")
+        self.options_for("c1", since)
+    }
+
+    fn options_for(&self, id: &str, since: Option<Cursor>) -> ChannelOptions {
+        ChannelOptions::new(id)
             .since(since)
             .base_url(BaseUrl::Explicit(self.base.clone()))
             .config(ClientConfig {
@@ -137,6 +153,14 @@ struct Seen {
     messages: Arc<Mutex<Vec<ChannelMessage<u64>>>>,
     statuses: Arc<Mutex<Vec<Status>>>,
     values: Arc<Mutex<Vec<Option<u64>>>>,
+    /// For each message, the generation of the handler that received it.
+    handled_by: Arc<Mutex<Vec<u64>>>,
+}
+
+impl Seen {
+    fn last_status(&self) -> Option<Status> {
+        self.statuses.lock().unwrap().last().copied()
+    }
 }
 
 #[derive(Props, Clone)]
@@ -287,6 +311,245 @@ async fn use_channel_reducer_refetches_on_reset_and_keeps_later_events() {
                 seen.values.lock().unwrap().contains(&Some(1_005))
             })
             .await;
+        })
+        .await;
+}
+
+/// Runs the dom for `duration`.
+async fn run_for(dom: &mut VirtualDom, duration: Duration) {
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            _ = dom.wait_for_work() => {}
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+        dom.render_immediate(&mut NoOpMutations);
+    }
+}
+
+/// Signals a test changes from outside the dom, and the subscription they control.
+#[derive(Clone, Copy)]
+struct Knobs {
+    id: Signal<String>,
+    enabled: Signal<bool>,
+    /// Bumping it gives the component a new handler.
+    handler: Signal<u64>,
+    channel: UseChannel,
+}
+
+type KnobSlot = Rc<RefCell<Option<Knobs>>>;
+
+fn knobs(slot: &KnobSlot) -> Knobs {
+    slot.borrow().expect("the app rendered")
+}
+
+#[derive(Props, Clone)]
+struct KnobProps {
+    server: TestServer,
+    /// The starting cursor of channel `c1`.
+    c1_since: Option<Cursor>,
+    /// The starting cursor of every other channel.
+    since: Option<Cursor>,
+    seen: Seen,
+    knobs: KnobSlot,
+}
+
+impl PartialEq for KnobProps {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl KnobProps {
+    fn options(&self, id: &str, enabled: bool) -> ChannelOptions {
+        let since = if id == "c1" {
+            self.c1_since
+        } else {
+            self.since
+        };
+        self.server.options_for(id, since).enabled(enabled)
+    }
+}
+
+#[allow(non_snake_case)]
+fn KnobApp(props: KnobProps) -> Element {
+    let id = use_signal(|| "c1".to_owned());
+    let enabled = use_signal(|| true);
+    let handler = use_signal(|| 0u64);
+    // A new closure on every render, which knows the handler generation it was made in.
+    let generation = handler();
+    let messages = props.seen.messages.clone();
+    let handled_by = props.seen.handled_by.clone();
+    let channel = use_channel::<Counter>(props.options(&id(), enabled()), move |message| {
+        messages.lock().unwrap().push(message);
+        handled_by.lock().unwrap().push(generation);
+    });
+    props.seen.statuses.lock().unwrap().push(channel.status());
+    *props.knobs.borrow_mut() = Some(Knobs {
+        id,
+        enabled,
+        handler,
+        channel,
+    });
+    rsx! {}
+}
+
+fn knob_props(server: &TestServer) -> KnobProps {
+    KnobProps {
+        server: server.clone(),
+        c1_since: Some(server.head()),
+        since: Some(server.head()),
+        seen: Seen::default(),
+        knobs: KnobSlot::default(),
+    }
+}
+
+fn mount(app: fn(KnobProps) -> Element, props: &KnobProps) -> VirtualDom {
+    let mut dom = VirtualDom::new_with_props(app, props.clone());
+    dom.rebuild_in_place();
+    dom
+}
+
+#[tokio::test]
+async fn changing_the_id_restarts_the_driver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            let props = knob_props(&server);
+            let mut dom = mount(KnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            let mut id = knobs(&props.knobs).id;
+            dom.in_runtime(|| id.set("c2".to_owned()));
+            run_until(&mut dom, || *server.connections.lock().unwrap() == 2).await;
+            let paths: Vec<String> = server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect();
+            assert_eq!(
+                paths,
+                vec!["/partyline/counter/c1", "/partyline/counter/c2"]
+            );
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_new_handler_does_not_restart_the_driver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            let props = knob_props(&server);
+            let mut dom = mount(KnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            let mut handler = knobs(&props.knobs).handler;
+            for _ in 0..3 {
+                let renders = seen.statuses.lock().unwrap().len();
+                dom.in_runtime(|| handler += 1);
+                run_until(&mut dom, || seen.statuses.lock().unwrap().len() > renders).await;
+            }
+            server.publish(1);
+            run_until(&mut dom, || seen.messages.lock().unwrap().len() == 1).await;
+            assert_eq!(
+                *seen.handled_by.lock().unwrap(),
+                vec![3],
+                "the latest handler"
+            );
+            assert_eq!(*server.connections.lock().unwrap(), 1);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn reconnect_resumes_from_the_cursor() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            let props = knob_props(&server);
+            let mut dom = mount(KnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            server.publish(1);
+            server.publish(2);
+            run_until(&mut dom, || seen.messages.lock().unwrap().len() == 2).await;
+            let channel = knobs(&props.knobs).channel;
+            dom.in_runtime(|| channel.reconnect());
+            run_until(&mut dom, || *server.connections.lock().unwrap() == 2).await;
+            let queries: Vec<String> = server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, query)| query.clone())
+                .collect();
+            assert_eq!(queries, vec!["v=1&cursor=3.0", "v=1&cursor=3.2"]);
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            server.publish(3);
+            run_until(&mut dom, || seen.messages.lock().unwrap().len() == 3).await;
+            assert_eq!(
+                *seen.messages.lock().unwrap(),
+                vec![
+                    ChannelMessage::Event(1),
+                    ChannelMessage::Event(2),
+                    ChannelMessage::Event(3)
+                ]
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn disabling_stops_and_enabling_resumes_from_the_cursor() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            let props = knob_props(&server);
+            let mut dom = mount(KnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            server.publish(1);
+            run_until(&mut dom, || seen.messages.lock().unwrap().len() == 1).await;
+
+            let mut enabled = knobs(&props.knobs).enabled;
+            dom.in_runtime(|| enabled.set(false));
+            let stopped = Status::Stopped {
+                reason: StopReason::App,
+            };
+            run_until(&mut dom, || seen.last_status() == Some(stopped)).await;
+            server.publish(2);
+            server.publish(3);
+            run_for(&mut dom, Duration::from_millis(100)).await;
+            assert_eq!(
+                seen.messages.lock().unwrap().len(),
+                1,
+                "nothing while disabled"
+            );
+            let channel = knobs(&props.knobs).channel;
+            assert_eq!(
+                dom.in_scope(ScopeId::ROOT, || *channel.cursor_signal().peek()),
+                Some(Cursor::new(3, 1)),
+                "the cursor is kept"
+            );
+
+            dom.in_runtime(|| enabled.set(true));
+            run_until(&mut dom, || seen.messages.lock().unwrap().len() == 3).await;
+            let queries: Vec<String> = server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, query)| query.clone())
+                .collect();
+            assert_eq!(queries, vec!["v=1&cursor=3.0", "v=1&cursor=3.1"]);
         })
         .await;
 }

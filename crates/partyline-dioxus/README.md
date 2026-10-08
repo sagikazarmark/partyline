@@ -42,7 +42,8 @@ On web the base URL defaults to the page origin, so most apps configure nothing.
 
 - **Start.** The driver starts from an effect. Effects do not run during server-side rendering.
 - **Stop.** On unmount the hook closes the socket with 1000.
-- **Change.** When the channel ID changes, the hook stops the old driver and starts a new one.
+- **Change.** When the channel ID changes, the hook stops the old driver and starts a new one from the new `since`. When the effective base URL or client config changes, or after `reconnect()`, it starts a new one from the current cursor. A new handler or token provider does not restart the driver: the latest one is called.
+- **Disable.** `ChannelOptions::enabled(false)` stops the driver, keeps the cursor, and sets the status to `Stopped { reason: StopReason::App }`. Enabling again resumes from the cursor.
 - **Wake.** On wasm, the client wakes on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume`, and network changes.
 
 A client that receives an event it cannot decode stops with `Stopped { reason: StopReason::Incompatible { .. } }` instead of reconnecting. The app is older than the server: ask the user to reload.

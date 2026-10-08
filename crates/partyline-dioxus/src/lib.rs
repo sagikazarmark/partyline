@@ -37,15 +37,21 @@
 //!   rendering. On the server the hook returns [`Status::Idle`] and opens nothing.
 //! - **Stop.** On unmount the hook stops the driver, which closes the socket with 1000.
 //! - **Change.** When the channel ID changes, the hook stops the old driver and starts a new
-//!   one from the new options' `since`.
+//!   one from the new options' `since`. When the effective base URL or client config
+//!   changes, or after [`UseChannel::reconnect`], it starts a new one from the current
+//!   cursor. A new handler or token provider does not restart the driver: the latest one
+//!   is called.
+//! - **Disable.** [`ChannelOptions::enabled`] set to `false` stops the driver and keeps the
+//!   cursor. Enabling it again resumes from the cursor.
 //! - **Wake.** On wasm, the `web-wake` feature of the client crate is on.
 //!
 //! partyline is not affiliated with Cloudflare or PartyKit, and is not wire-compatible with
 //! PartyServer or partysocket.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use dioxus::prelude::*;
 use futures::StreamExt;
@@ -99,6 +105,7 @@ pub struct ChannelOptions {
     base_url: Option<BaseUrl>,
     token: Option<TokenProvider>,
     config: Option<ClientConfig>,
+    enabled: bool,
 }
 
 impl ChannelOptions {
@@ -110,6 +117,7 @@ impl ChannelOptions {
             base_url: None,
             token: None,
             config: None,
+            enabled: true,
         }
     }
 
@@ -137,6 +145,16 @@ impl ChannelOptions {
         self
     }
 
+    /// Connects only while `enabled` is `true`. Default: `true`.
+    ///
+    /// Disabling stops the driver, keeps the cursor, and sets the status to
+    /// `Stopped { reason: StopReason::App }`. Enabling again resumes from the cursor, so the
+    /// app receives exactly the events it missed.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
     /// The channel ID.
     pub fn id(&self) -> &str {
         &self.id
@@ -150,6 +168,15 @@ pub enum ChannelMessage<E> {
     Event(E),
     /// The cursor could not be resumed. Discard local state and refetch.
     Reset,
+}
+
+/// What the driver is started with. A change restarts it.
+#[derive(Clone, PartialEq)]
+struct Target {
+    id: String,
+    base_url: BaseUrl,
+    config: ClientConfig,
+    enabled: bool,
 }
 
 #[derive(Default)]
@@ -213,66 +240,113 @@ impl UseChannel {
         }
     }
 
-    /// Stops the driver and starts a new one from the current cursor.
+    /// Stops the driver and starts a new one from the current cursor. It also restarts a
+    /// driver that stopped for good, for example after [`StopReason::Closed`]. It does
+    /// nothing while the subscription is disabled.
     pub fn reconnect(&self) {
         let mut restart = self.restart;
         restart += 1;
     }
 }
 
+/// A token provider that calls whichever provider `current` holds at each connect.
+fn latest_token(current: Arc<Mutex<Option<TokenProvider>>>) -> TokenProvider {
+    TokenProvider::new(move |request| {
+        let provider = current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        async move {
+            match provider {
+                Some(provider) => provider.get(request).await,
+                None => None,
+            }
+        }
+    })
+}
+
 fn use_channel_events<C: Channel>(
     options: ChannelOptions,
     on_event: Callback<ClientEvent<C::Event>>,
 ) -> UseChannel {
-    let settings = try_use_context::<Signal<PartylineSettings>>();
+    // Reading the settings subscribes the component, so a provider change is seen here.
+    let settings = try_use_context::<Signal<PartylineSettings>>()
+        .map(|s| s.read().clone())
+        .unwrap_or_default();
     let mut status = use_signal(|| Status::Idle);
     let mut cursor = use_signal(|| options.since);
     let restart = use_signal(|| 0u64);
     let driver = use_hook(|| Rc::new(RefCell::new(Driver::default())));
     let driver_value = use_hook(|| CopyValue::new(driver.clone()));
-    let latest = use_hook(|| Rc::new(RefCell::new(options.clone())));
-    *latest.borrow_mut() = options.clone();
+    let since = use_hook(|| Rc::new(Cell::new(options.since)));
+    since.set(options.since);
+    // The driver asks this cell at each connect, so a new provider needs no restart. It is
+    // `Send` on native targets, where the token provider must be. On wasm nothing is.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let token = use_hook(|| Arc::new(Mutex::new(None)));
+    *token.lock().unwrap_or_else(PoisonError::into_inner) =
+        options.token.clone().or(settings.token);
 
     {
         let driver = driver.clone();
         use_drop(move || driver.borrow_mut().stop());
     }
 
-    use_effect(use_reactive((&options.id,), move |(id,)| {
+    let target = Target {
+        id: options.id.clone(),
+        base_url: options.base_url.or(settings.base_url).unwrap_or_default(),
+        config: options.config.or(settings.config).unwrap_or_default(),
+        enabled: options.enabled,
+    };
+    use_effect(use_reactive(&target, move |target| {
         // Subscribe to restarts.
         let _ = restart();
-        let options = latest.borrow().clone();
-        let settings = settings.map(|s| s.peek().clone()).unwrap_or_default();
 
         let mut state = driver.borrow_mut();
         state.stop();
         state.generation += 1;
         let generation = state.generation;
+        let same_channel = state.id.as_deref() == Some(target.id.as_str());
         // A restart of the same channel resumes from the current cursor.
-        let since = if state.id.as_deref() == Some(id.as_str()) {
+        let start = if same_channel {
             *cursor.peek()
         } else {
-            options.since
+            since.get()
         };
-        state.id = Some(id.clone());
+        state.id = Some(target.id.clone());
 
-        let (handle, mut events, run) = partyline_client::connect::<C>(ConnectOptions {
-            base_url: options.base_url.or(settings.base_url).unwrap_or_default(),
-            id,
-            since,
-            token: options.token.or(settings.token),
-            config: options.config.or(settings.config).unwrap_or_default(),
+        let connection = target.enabled.then(|| {
+            let (handle, events, run) = partyline_client::connect::<C>(ConnectOptions {
+                base_url: target.base_url,
+                id: target.id,
+                since: start,
+                token: Some(latest_token(token.clone())),
+                config: target.config,
+            });
+            // The driver outlives the component, so it can close the socket cleanly after
+            // stop.
+            dioxus::dioxus_core::spawn_forever(run);
+            state.handle = Some(handle.clone());
+            (handle, events)
         });
-        // The driver outlives the component, so it can close the socket cleanly after stop.
-        dioxus::dioxus_core::spawn_forever(run);
-        state.handle = Some(handle.clone());
         drop(state);
-        if *cursor.peek() != since {
-            cursor.set(since);
+        if *cursor.peek() != start {
+            cursor.set(start);
+        }
+        if connection.is_none() {
+            let stopped = Status::Stopped {
+                reason: StopReason::App,
+            };
+            if *status.peek() != stopped {
+                status.set(stopped);
+            }
         }
 
         let driver = driver.clone();
         spawn(async move {
+            let Some((handle, mut events)) = connection else {
+                return;
+            };
             while let Some(event) = events.next().await {
                 if driver.borrow().generation != generation {
                     break;
