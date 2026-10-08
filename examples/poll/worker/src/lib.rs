@@ -155,27 +155,7 @@ impl DurableObject for PollObject {
         }
     }
 
-    async fn websocket_message(
-        &self,
-        ws: WebSocket,
-        message: WebSocketIncomingMessage,
-    ) -> Result<()> {
-        self.hub.on_message(ws, message).await
-    }
-
-    async fn websocket_close(
-        &self,
-        ws: WebSocket,
-        code: usize,
-        reason: String,
-        was_clean: bool,
-    ) -> Result<()> {
-        self.hub.on_close(ws, code, reason, was_clean).await
-    }
-
-    async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
-        self.hub.on_error(ws, error).await
-    }
+    partyline_worker::hub_websocket_handlers!(hub);
 
     async fn alarm(&self) -> Result<Response> {
         // The daily reset. The hub has no age-based trimming in Latest mode.

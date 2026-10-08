@@ -36,8 +36,25 @@ The struct name is the `class_name` in the wrangler configuration.
 
 ## Embed the hub by hand
 
-An object that owns its own state or routes embeds the hub as a field and delegates each handler.
-See the `Hub` documentation for the full form, and [`examples/orders`](https://github.com/sagikazarmark/partyline/tree/main/examples/orders) for an object that applies each event to its own table before it publishes.
+An object that owns its own state or routes embeds the hub as a field.
+`hub_handlers!` writes the `websocket_message`, `websocket_close`, `websocket_error`, and `alarm` handlers, so none is missed.
+`Hub::fetch_with` calls a closure with each event that `Publisher::publish` sends, before the hub stores and sends it, so the object applies the event to its own state in the same turn:
+
+```rust
+impl DurableObject for OrderChannel {
+    fn new(state: State, _env: Env) -> Self {
+        Self { hub: Hub::new(state, HubConfig::default()) }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.hub.fetch_with(req, |event| self.apply(event)).await
+    }
+
+    partyline_worker::hub_handlers!(hub);
+}
+```
+
+See [`examples/orders`](https://github.com/sagikazarmark/partyline/tree/main/examples/orders) for the full object.
 
 ## Use it from the Worker
 

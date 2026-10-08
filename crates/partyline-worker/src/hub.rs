@@ -98,18 +98,8 @@ impl HubConfig {
 ///     async fn fetch(&self, req: Request) -> Result<Response> {
 ///         self.hub.fetch(req).await
 ///     }
-///     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
-///         self.hub.on_message(ws, msg).await
-///     }
-///     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, clean: bool) -> Result<()> {
-///         self.hub.on_close(ws, code, reason, clean).await
-///     }
-///     async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
-///         self.hub.on_error(ws, error).await
-///     }
-///     async fn alarm(&self) -> Result<Response> {
-///         self.hub.on_alarm().await
-///     }
+///     // websocket_message, websocket_close, websocket_error, and alarm.
+///     partyline_worker::hub_handlers!(hub);
 /// }
 /// ```
 pub struct Hub<C: Channel> {
@@ -164,7 +154,27 @@ impl<C: Channel> Hub<C> {
     /// | `GET /head` | Return the current cursor |
     /// | `POST /close?tag=..&code=..` | Close sockets with a tag and close code |
     /// | `POST /reset` | Wipe the log, start a new epoch, close every socket with 1012 |
-    pub async fn fetch(&self, mut req: Request) -> worker::Result<Response> {
+    pub async fn fetch(&self, req: Request) -> worker::Result<Response> {
+        self.fetch_with(req, |_| Ok(())).await
+    }
+
+    /// Like [`Hub::fetch`], but calls `on_publish` with each event that
+    /// [`crate::Publisher::publish`] sends, before the hub stores it and sends it out.
+    ///
+    /// Use it to apply the event to the object's own state, so the state change and the
+    /// event land in one turn. `on_publish` runs synchronously, after the event is
+    /// validated. An error from it aborts the publish.
+    ///
+    /// ```ignore
+    /// async fn fetch(&self, req: Request) -> Result<Response> {
+    ///     self.hub.fetch_with(req, |event| self.apply(event)).await
+    /// }
+    /// ```
+    pub async fn fetch_with(
+        &self,
+        mut req: Request,
+        on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
+    ) -> worker::Result<Response> {
         if is_upgrade(&req) {
             return self.accept(&req);
         }
@@ -172,7 +182,7 @@ impl<C: Channel> Hub<C> {
         match (req.method(), url.path()) {
             (Method::Post, "/publish") => {
                 let body = req.bytes().await?;
-                match self.publish_raw(&body).await {
+                match self.publish_raw(&body, on_publish).await {
                     Ok(cursor) => Response::ok(cursor.to_string()),
                     Err(PublishError::Invalid(e)) => Response::error(e, 400),
                     Err(PublishError::TooLarge(e)) => Response::error(e, 413),
@@ -266,16 +276,22 @@ impl<C: Channel> Hub<C> {
     pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
         let body =
             codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
-        self.publish_raw(&body)
+        self.publish_raw(&body, |_| Ok(()))
             .await
             .map_err(PublishError::into_worker)
     }
 
-    async fn publish_raw(&self, body: &[u8]) -> Result<Cursor, PublishError> {
+    async fn publish_raw(
+        &self,
+        body: &[u8],
+        on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
+    ) -> Result<Cursor, PublishError> {
         let limits = self.config.limits();
         server::check_size::<worker::Error>(body, &limits).map_err(PublishError::from_server)?;
         // Validate that the body is this channel's event type before storing it.
-        codec::decode_event::<C::Event>(body).map_err(|e| PublishError::Invalid(e.to_string()))?;
+        let event = codec::decode_event::<C::Event>(body)
+            .map_err(|e| PublishError::Invalid(e.to_string()))?;
+        on_publish(&event).map_err(PublishError::Worker)?;
         let retention = self.config.retention(C::MODE);
         let (head, frame) =
             server::publish_with(&mut self.log(), body, &retention, &limits, now_ms())

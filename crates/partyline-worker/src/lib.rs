@@ -3,8 +3,8 @@
 //! partyline pushes sequenced, resumable events from a Durable Object to clients over
 //! WebSockets. This crate adapts the core server logic of [`partyline`] to a Durable Object:
 //!
-//! - [`Hub`]: embed it in your own Durable Object and delegate the handlers to it, or
-//!   generate the whole object with [`channel_object!`].
+//! - [`Hub`]: embed it in your own Durable Object and delegate the handlers to it with
+//!   [`hub_handlers!`], or generate the whole object with [`channel_object!`].
 //! - [`Connect`]: forward a client's WebSocket upgrade from the Worker to the hub.
 //! - [`Publisher`]: publish events, read the head, close sockets by tag, and reset.
 //!
@@ -100,36 +100,86 @@ macro_rules! channel_object {
                     self.hub.fetch(req).await
                 }
 
-                async fn websocket_message(
-                    &self,
-                    ws: ::worker::WebSocket,
-                    message: ::worker::WebSocketIncomingMessage,
-                ) -> ::worker::Result<()> {
-                    self.hub.on_message(ws, message).await
-                }
-
-                async fn websocket_close(
-                    &self,
-                    ws: ::worker::WebSocket,
-                    code: usize,
-                    reason: ::std::string::String,
-                    was_clean: bool,
-                ) -> ::worker::Result<()> {
-                    self.hub.on_close(ws, code, reason, was_clean).await
-                }
-
-                async fn websocket_error(
-                    &self,
-                    ws: ::worker::WebSocket,
-                    error: ::worker::Error,
-                ) -> ::worker::Result<()> {
-                    self.hub.on_error(ws, error).await
-                }
-
-                async fn alarm(&self) -> ::worker::Result<::worker::Response> {
-                    self.hub.on_alarm().await
-                }
+                $crate::hub_handlers!(hub);
             }
         };
+    };
+}
+
+/// Generates the `websocket_message`, `websocket_close`, `websocket_error`, and `alarm`
+/// handlers of a Durable Object that embeds a [`Hub`], delegating each to the hub.
+///
+/// Use it inside `impl DurableObject`, with the name of the hub field. The object writes
+/// `new` and `fetch` itself.
+///
+/// ```ignore
+/// impl DurableObject for OrderChannel {
+///     fn new(state: State, _env: Env) -> Self { /* .. */ }
+///
+///     async fn fetch(&self, req: Request) -> Result<Response> {
+///         self.hub.fetch_with(req, |event| self.apply(event)).await
+///     }
+///
+///     partyline_worker::hub_handlers!(hub);
+/// }
+/// ```
+///
+/// An object with its own alarm uses [`hub_websocket_handlers!`] and writes `alarm` itself.
+#[macro_export]
+macro_rules! hub_handlers {
+    ($hub:ident) => {
+        $crate::hub_websocket_handlers!($hub);
+
+        async fn alarm(&self) -> ::worker::Result<::worker::Response> {
+            self.$hub.on_alarm().await
+        }
+    };
+}
+
+/// Generates the `websocket_message`, `websocket_close`, and `websocket_error` handlers of a
+/// Durable Object that embeds a [`Hub`], delegating each to the hub.
+///
+/// Use it in an object with its own alarm. Its `alarm` handler calls [`Hub::on_alarm`].
+///
+/// ```ignore
+/// impl DurableObject for PollObject {
+///     // new, fetch ..
+///
+///     partyline_worker::hub_websocket_handlers!(hub);
+///
+///     async fn alarm(&self) -> Result<Response> {
+///         // The object's own work, then the hub's trimming.
+///         self.hub.on_alarm().await
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! hub_websocket_handlers {
+    ($hub:ident) => {
+        async fn websocket_message(
+            &self,
+            ws: ::worker::WebSocket,
+            message: ::worker::WebSocketIncomingMessage,
+        ) -> ::worker::Result<()> {
+            self.$hub.on_message(ws, message).await
+        }
+
+        async fn websocket_close(
+            &self,
+            ws: ::worker::WebSocket,
+            code: usize,
+            reason: ::std::string::String,
+            was_clean: bool,
+        ) -> ::worker::Result<()> {
+            self.$hub.on_close(ws, code, reason, was_clean).await
+        }
+
+        async fn websocket_error(
+            &self,
+            ws: ::worker::WebSocket,
+            error: ::worker::Error,
+        ) -> ::worker::Result<()> {
+            self.$hub.on_error(ws, error).await
+        }
     };
 }

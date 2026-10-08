@@ -59,54 +59,28 @@ impl DurableObject for OrderChannel {
         Self { hub }
     }
 
-    async fn fetch(&self, mut req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         let upgrade = req.headers().get("upgrade")?.is_some();
         match (upgrade, req.method(), req.path().as_str()) {
             (false, Method::Get, "/order") => Response::from_json(&OrderSnapshot {
                 order: self.load()?,
                 head: self.hub.head()?,
             }),
-            // Publisher::publish lands here. Apply the event to the order, then publish it.
-            (false, Method::Post, "/publish") => {
-                let event: OrderEvent = match req.json().await {
-                    Ok(event) => event,
-                    Err(e) => return Response::error(e.to_string(), 400),
-                };
-                let mut order = self.load()?;
-                order.apply(&event);
-                self.save(&order)?;
-                let head = self.hub.publish(&event).await?;
-                Response::ok(head.to_string())
+            // Publisher::publish lands in the hub, which applies the event to the order in
+            // the same turn as it stores and sends it.
+            _ => {
+                self.hub
+                    .fetch_with(req, |event| {
+                        let mut order = self.load()?;
+                        order.apply(event);
+                        self.save(&order)
+                    })
+                    .await
             }
-            _ => self.hub.fetch(req).await,
         }
     }
 
-    async fn websocket_message(
-        &self,
-        ws: WebSocket,
-        message: WebSocketIncomingMessage,
-    ) -> Result<()> {
-        self.hub.on_message(ws, message).await
-    }
-
-    async fn websocket_close(
-        &self,
-        ws: WebSocket,
-        code: usize,
-        reason: String,
-        was_clean: bool,
-    ) -> Result<()> {
-        self.hub.on_close(ws, code, reason, was_clean).await
-    }
-
-    async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
-        self.hub.on_error(ws, error).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.hub.on_alarm().await
-    }
+    partyline_worker::hub_handlers!(hub);
 }
 
 /// The `{id}` route parameter, percent-decoded. Routers hand it out still encoded, and the
