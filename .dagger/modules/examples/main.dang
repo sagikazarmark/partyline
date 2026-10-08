@@ -1,10 +1,13 @@
 """
 Build, run and deploy the partyline examples, and run the end-to-end and browser tests against them.
+Also the workspace checks that need a pinned toolchain or tool: the minimum Rust version and the
+Markdown link check.
 """
 type Examples {
   let ws: Workspace!
   let rustContainer: Container!
   let wranglerVersion: String!
+  let compatibilityDate: String
 
   new(
     ws: Workspace!,
@@ -20,6 +23,11 @@ type Examples {
     Tailwind CSS CLI version that dx compiles the web clients' styles with.
     """
     tailwindVersion: String! = "v4.1.5",
+    """
+    Workers compatibility date to run every example with, such as 2025-04-01. Default: the date
+    in each wrangler.toml.
+    """
+    compatibilityDate: String,
   ) {
     # Commands run from the repository root, wherever Dagger is called from.
     self.ws = ws.withWorkdir(".")
@@ -39,6 +47,7 @@ type Examples {
       )
 
     self.wranglerVersion = wranglerVersion
+    self.compatibilityDate = compatibilityDate
 
     self
   }
@@ -75,6 +84,7 @@ type Examples {
       wranglerVersion: self.wranglerVersion,
       config: self.ws.file("e2e/fixture/wrangler.toml"),
       worker: self.worker("e2e/fixture"),
+      compatibilityDate: self.compatibilityDate,
     )
   }
 
@@ -82,11 +92,68 @@ type Examples {
   Run the end-to-end tests against the orders and chat examples and the fixture under wrangler dev.
   """
   endToEnd: Void @check {
+    self.endToEndWith(self.orders, self.fixture, self.chat)
+  }
+
+  """
+  Run the end-to-end tests with every Worker at the oldest supported compatibility date.
+
+  Hibernation, the WebSocket auto-response, and close handling change with compatibility flags,
+  so the hub is tested at the oldest date it supports as well as at the date the examples pin.
+  """
+  endToEndOldestCompatibilityDate: Void @check {
+    let date = "2025-04-01"
+
+    self.endToEndWith(
+      self.orders.withCompatibilityDate(date),
+      self.fixture.withCompatibilityDate(date),
+      self.chat.withCompatibilityDate(date),
+    )
+  }
+
+  """
+  Build the published crates natively and for wasm32 with the minimum supported Rust version.
+  """
+  msrv: Void @check {
+    let crates = ["-p", "partyline", "-p", "partyline-client", "-p", "partyline-dioxus", "-p", "partyline-worker"]
+
+    rust(self.ws, Dagger.container.from("rust:1.91"), targets: ["wasm32-unknown-unknown"])
+      .container
+      .withExec(["cargo", "check", "--locked"] + crates)
+      .withExec(["cargo", "check", "--locked", "--target", "wasm32-unknown-unknown"] + crates)
+      .sync
+
+    null
+  }
+
+  """
+  Check the relative links and anchors in the Markdown files. Links to other sites are not checked.
+  """
+  links: Void @check {
+    Dagger
+      .container
+      .from("lycheeverse/lychee:0.24.2")
+      .withMountedDirectory("/src", self.ws.directory("."))
+      .withWorkdir("/src")
+      .withExec([
+        "lychee", "--offline", "--no-progress", "--include-fragments",
+        "--exclude-path", "target", "--exclude-path", ".devenv", "--exclude-path", ".claude",
+        ".",
+      ])
+      .sync
+
+    null
+  }
+
+  """
+  Run the end-to-end tests against these Workers under wrangler dev.
+  """
+  let endToEndWith(orders: Example!, fixture: Example!, chat: Example!): Void {
     rust(self.ws, self.rustContainer)
       .container
-      .withServiceBinding("orders", self.orders.service)
-      .withServiceBinding("fixture", self.fixture.service)
-      .withServiceBinding("chat", self.chat.service)
+      .withServiceBinding("orders", orders.service)
+      .withServiceBinding("fixture", fixture.service)
+      .withServiceBinding("chat", chat.service)
       .withEnvVariable("PARTYLINE_E2E_URL", "http://orders:8787")
       .withEnvVariable("PARTYLINE_E2E_FIXTURE_URL", "http://fixture:8787")
       .withEnvVariable("PARTYLINE_E2E_CHAT_URL", "http://chat:8787")
@@ -155,6 +222,7 @@ type Examples {
           package: name + "-web",
         )
         .directory("public"),
+      compatibilityDate: self.compatibilityDate,
     )
   }
 
@@ -186,6 +254,7 @@ type Example {
   let worker: Directory!
   let web: Directory
   let devVariables: [Variable!]!
+  let compatibilityDate: String
 
   new(
     name: String!,
@@ -205,6 +274,10 @@ type Example {
     Web client served as static assets.
     """
     web: Directory,
+    """
+    Workers compatibility date to use instead of the one in wrangler.toml.
+    """
+    compatibilityDate: String,
   ) {
     self.name = name
     self.wrangler = Dagger.wrangler(version: wranglerVersion)
@@ -212,6 +285,7 @@ type Example {
     self.worker = worker
     self.web = web
     self.devVariables = []
+    self.compatibilityDate = compatibilityDate
 
     self
   }
@@ -221,6 +295,15 @@ type Example {
   """
   withDevVariable(name: String!, value: String!): Example! {
     self.devVariables += [Variable(name: name, value: value)]
+
+    self
+  }
+
+  """
+  Use this Workers compatibility date, such as 2025-04-01, instead of the one in wrangler.toml.
+  """
+  withCompatibilityDate(date: String!): Example! {
+    self.compatibilityDate = date
 
     self
   }
@@ -236,9 +319,23 @@ type Example {
       raise `${self.name}: wrangler.toml has no "${buildStep}" step to remove`
     }
 
+    # Every wrangler.toml pins this date. Update it here when the examples move to a newer one.
+    let pinnedDate = "compatibility_date = \"2026-09-01\"\n"
+    let date = self.compatibilityDate
+    if (date != null) {
+      if (!config.contains(pinnedDate)) {
+        raise `${self.name}: wrangler.toml has no "${pinnedDate}" line to replace`
+      }
+    }
+    let dated = if (date != null) {
+      config.replace(pinnedDate, `compatibility_date = "${date}"\n`)
+    } else {
+      config
+    }
+
     Dagger
       .directory
-      .withNewFile("wrangler.toml", config.replace(buildStep, ""))
+      .withNewFile("wrangler.toml", dated.replace(buildStep, ""))
       .withDirectory("build", self.worker)
       .{
         let web = self.web

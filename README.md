@@ -142,10 +142,10 @@ fn OrderStatus(id: String, initial: Order, head: Cursor) -> Element {
 ```shell
 cargo test                                            # layers 1-3 (native)
 cargo check --workspace --target wasm32-unknown-unknown
-dagger check examples                                 # layers 3 (browser) and 4: wrangler dev + end-to-end tests
+dagger check examples                                 # layers 3 (browser) and 4, MSRV, and the Markdown link check
 ```
 
-The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require.
+The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI builds on it.
 
 The four crates share one version and are released together: `cargo release` tags `v{version}`, and the [release workflow](.github/workflows/release.yml) publishes from the tag.
 

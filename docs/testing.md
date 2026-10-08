@@ -26,10 +26,24 @@ dagger check examples:end-to-end
 ```
 
 Both run in containers with Dagger, so they need only Docker and the Dagger CLI.
-`dagger check examples` also builds every example.
+`dagger check examples` also builds every example, and runs these checks:
+
+| Check | What it proves |
+| --- | --- |
+| `examples:end-to-end-oldest-compatibility-date` | Layer 4 passes with every Worker at compatibility date 2025-04-01, as well as at the date the examples pin. Hibernation, the auto-response, and close handling depend on compatibility flags |
+| `examples:msrv` | The four published crates build on Rust 1.91, natively and for wasm32 |
+| `examples:links` | Every relative link and anchor in the Markdown files resolves. Links to other sites are not checked |
+
+`dagger check -l` lists every check.
 
 Run an example locally with `dagger call examples orders service up --ports 8787:8787`.
 Deploy one with `dagger call examples poll deploy --account-id <id> --api-token env://CLOUDFLARE_API_TOKEN`.
+
+The link check uses [lychee](https://lychee.cli.rs). To run it without Dagger:
+
+```shell
+lychee --offline --include-fragments --exclude-path target --exclude-path .devenv --exclude-path .claude .
+```
 
 ## Layer 2 carries the main guarantee
 
