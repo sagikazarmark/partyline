@@ -47,6 +47,7 @@ The implementation follows the plan, with these changes. Each one came from a pr
 | Client `rng` | `impl FnMut() -> f64 + 'static` | Also `Send` | The native driver future is `Send`, so it can run on a multi-threaded tokio runtime |
 | Layout | The demo lives in `demo/` | `examples/poll`, next to `examples/orders` | Every runnable app lives in `examples/`. The poll is still the public demo |
 | Test hooks | Not specified | Test-only behavior (magic tokens, close-by-tag and reset routes) lives in the `e2e/fixture` Worker, not in the examples | Keeps `examples/orders` minimal and keeps those routes off public deployments |
+| Versioning | Each crate versioned and released on its own | One shared workspace version and one `v{version}` tag. 0.1.0 was tagged per crate; 0.2.0 is the first shared release | The crates move in lockstep because they share the wire protocol. One tag is simpler to release, and users match one version across all four crates |
 
 ## Tooling notes
 

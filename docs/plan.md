@@ -595,7 +595,13 @@ The demo is built in M4 and replaces the example app as the phone-matrix target.
 
 ## Workspace, tooling, and testing
 
-One Cargo workspace holds the four crates, each versioned and released on its own. `partyline-dioxus` and `partyline-worker` track fast-moving 0.x dependencies, and independent versions keep that churn out of the core.
+One Cargo workspace holds the four crates. They share one version and are released together, with one `v{version}` tag.
+
+- **Lockstep.** The crates share the wire protocol and the core types, so a change in one usually needs a release of the others.
+- **One tag.** One tag and one changelog entry cover a release.
+- **Simple for users.** An app uses the same version of every partyline crate, and needs no compatibility table.
+
+A breaking change in `dioxus` or `worker` therefore bumps every crate. This is accepted while all four are 0.x.
 
 ### Layout
 
@@ -693,7 +699,7 @@ The largest risk is a gap in the Rust bindings for Durable Objects, and M0 exist
 | --- | --- | --- |
 | `worker` lacks an API the hub needs | Hibernation or the SQLite log does not work as designed | M0 spike. Fallbacks: key-value storage with ordered keys for the log, and handling `ping` in the message handler |
 | The Worker's router cannot pass upgrades through cleanly | `Connect::forward` needs a different shape | Check in M0 against the real app's router before writing the helper |
-| `dioxus` and `worker` release breaking 0.x versions | Frequent major bumps | Separate crates with independent versions. Keep both adapters thin |
+| `dioxus` and `worker` release breaking 0.x versions | Frequent major bumps | Separate crates, so only the adapters depend on them. Keep both adapters thin. All crates share one version, so an upstream break bumps every crate |
 | Dioxus adds reconnect to its own WebSocket hook | Part of the client overlaps | Resume and the Durable Object backend remain the reason to use partyline |
 | A channel outgrows one Durable Object | Connections are refused past the per-object limit | Keep the channel-to-object mapping pluggable. Add sharding when a real channel needs it |
 | No wake signal on native mobile | Dead sockets are found only by the heartbeat | Accept for v1. Add platform lifecycle hooks when Dioxus exposes them |
