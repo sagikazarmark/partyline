@@ -155,11 +155,17 @@ struct Seen {
     values: Arc<Mutex<Vec<Option<u64>>>>,
     /// For each message, the generation of the handler that received it.
     handled_by: Arc<Mutex<Vec<u64>>>,
+    /// The number of refetches started.
+    refetches: Arc<Mutex<usize>>,
 }
 
 impl Seen {
     fn last_status(&self) -> Option<Status> {
         self.statuses.lock().unwrap().last().copied()
+    }
+
+    fn last_value(&self) -> Option<u64> {
+        self.values.lock().unwrap().last().copied().flatten()
     }
 }
 
@@ -272,13 +278,13 @@ async fn use_channel_latest_starts_with_the_current_value() {
 #[allow(non_snake_case)]
 fn ReducerApp(props: AppProps) -> Element {
     // The state is the sum of all events. The refetch returns the server's view.
-    let (sum, _channel) = use_channel_reducer::<Counter, u64, _, _>(
+    let (sum, _channel) = use_channel_reducer::<Counter, u64, _, _, _>(
         props.options.clone(),
         || 0,
         |sum, n| *sum += n,
         || async {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            (1_000, Cursor::new(3, 2))
+            Ok::<_, String>((1_000, Cursor::new(3, 2)))
         },
     );
     props.seen.values.lock().unwrap().push(Some(sum()));
@@ -343,6 +349,15 @@ fn knobs(slot: &KnobSlot) -> Knobs {
     slot.borrow().expect("the app rendered")
 }
 
+/// How the reducer app's refetch behaves.
+#[derive(Clone, Copy)]
+struct Refetch {
+    delay: Duration,
+    /// The number of attempts that fail before one succeeds.
+    failures: usize,
+    head: Cursor,
+}
+
 #[derive(Props, Clone)]
 struct KnobProps {
     server: TestServer,
@@ -350,6 +365,7 @@ struct KnobProps {
     c1_since: Option<Cursor>,
     /// The starting cursor of every other channel.
     since: Option<Cursor>,
+    refetch: Option<Refetch>,
     seen: Seen,
     knobs: KnobSlot,
 }
@@ -394,11 +410,51 @@ fn KnobApp(props: KnobProps) -> Element {
     rsx! {}
 }
 
+#[allow(non_snake_case)]
+fn ReducerKnobApp(props: KnobProps) -> Element {
+    let id = use_signal(|| "c1".to_owned());
+    let enabled = use_signal(|| true);
+    let handler = use_signal(|| 0u64);
+    let refetches = props.seen.refetches.clone();
+    let refetch = props.refetch.expect("a refetch");
+    let (sum, channel) = use_channel_reducer::<Counter, u64, _, _, _>(
+        props.options(&id(), enabled()),
+        || 0,
+        |sum, n| *sum += n,
+        move || {
+            let refetches = refetches.clone();
+            async move {
+                let attempt = {
+                    let mut refetches = refetches.lock().unwrap();
+                    *refetches += 1;
+                    *refetches
+                };
+                tokio::time::sleep(refetch.delay).await;
+                if attempt <= refetch.failures {
+                    Err(format!("attempt {attempt} failed"))
+                } else {
+                    Ok((1_000, refetch.head))
+                }
+            }
+        },
+    );
+    props.seen.values.lock().unwrap().push(Some(sum()));
+    props.seen.statuses.lock().unwrap().push(channel.status());
+    *props.knobs.borrow_mut() = Some(Knobs {
+        id,
+        enabled,
+        handler,
+        channel,
+    });
+    rsx! {}
+}
+
 fn knob_props(server: &TestServer) -> KnobProps {
     KnobProps {
         server: server.clone(),
         c1_since: Some(server.head()),
         since: Some(server.head()),
+        refetch: None,
         seen: Seen::default(),
         knobs: KnobSlot::default(),
     }
@@ -550,6 +606,137 @@ async fn disabling_stops_and_enabling_resumes_from_the_cursor() {
                 .map(|(_, query)| query.clone())
                 .collect();
             assert_eq!(queries, vec!["v=1&cursor=3.0", "v=1&cursor=3.1"]);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn use_channel_reducer_starts_over_when_the_id_changes() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            let props = KnobProps {
+                // Channel c2 starts with live events only.
+                since: None,
+                refetch: Some(Refetch {
+                    delay: Duration::ZERO,
+                    failures: 0,
+                    head: server.head(),
+                }),
+                ..knob_props(&server)
+            };
+            let mut dom = mount(ReducerKnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            server.publish(1);
+            server.publish(2);
+            run_until(&mut dom, || seen.last_value() == Some(3)).await;
+
+            let mut id = knobs(&props.knobs).id;
+            dom.in_runtime(|| id.set("c2".to_owned()));
+            run_until(&mut dom, || *server.connections.lock().unwrap() == 2).await;
+            run_until(&mut dom, || seen.last_value() == Some(0)).await;
+            run_until(&mut dom, || seen.last_status() == Some(Status::Open)).await;
+            server.publish(4);
+            run_until(&mut dom, || seen.last_value() == Some(4)).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn use_channel_reducer_discards_a_refetch_for_the_old_id() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            server.publish(1);
+            let props = KnobProps {
+                // A cursor from another epoch: c1 gets Reset and refetches for 300 ms.
+                c1_since: Some(Cursor::new(99, 1)),
+                refetch: Some(Refetch {
+                    delay: Duration::from_millis(300),
+                    failures: 0,
+                    head: server.head(),
+                }),
+                ..knob_props(&server)
+            };
+            let mut dom = mount(ReducerKnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || *seen.refetches.lock().unwrap() == 1).await;
+
+            let mut id = knobs(&props.knobs).id;
+            dom.in_runtime(|| id.set("c2".to_owned()));
+            run_for(&mut dom, Duration::from_millis(600)).await;
+            assert_eq!(*seen.refetches.lock().unwrap(), 1);
+            assert!(
+                !seen.values.lock().unwrap().contains(&Some(1_000)),
+                "the old refetch is discarded"
+            );
+            assert_eq!(seen.last_value(), Some(0));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn use_channel_reducer_retries_a_failed_refetch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            server.publish(1);
+            server.publish(2);
+            let props = KnobProps {
+                c1_since: Some(Cursor::new(99, 1)),
+                refetch: Some(Refetch {
+                    delay: Duration::ZERO,
+                    failures: 1,
+                    head: server.head(),
+                }),
+                ..knob_props(&server)
+            };
+            let mut dom = mount(ReducerKnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || *seen.refetches.lock().unwrap() == 1).await;
+            // Buffered while the refetch waits to retry, then applied to the fresh state.
+            server.publish(5);
+            run_until(&mut dom, || seen.last_value() == Some(1_005)).await;
+            assert_eq!(*seen.refetches.lock().unwrap(), 2);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn use_channel_reducer_drops_buffered_events_from_another_epoch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let server = TestServer::start(Mode::Log).await;
+            server.publish(1);
+            server.publish(2);
+            let props = KnobProps {
+                c1_since: Some(Cursor::new(99, 1)),
+                // The refetch reads a log that was wiped again since the reset.
+                refetch: Some(Refetch {
+                    delay: Duration::from_millis(200),
+                    failures: 0,
+                    head: Cursor::new(4, 0),
+                }),
+                ..knob_props(&server)
+            };
+            let mut dom = mount(ReducerKnobApp, &props);
+            let seen = &props.seen;
+            run_until(&mut dom, || *seen.refetches.lock().unwrap() == 1).await;
+            server.publish(5);
+            run_until(&mut dom, || seen.last_value() == Some(1_000)).await;
+            run_for(&mut dom, Duration::from_millis(100)).await;
+            assert_eq!(
+                seen.last_value(),
+                Some(1_000),
+                "event 3 of epoch 3 is dropped"
+            );
+            server.publish(6);
+            run_until(&mut dom, || seen.last_value() == Some(1_006)).await;
         })
         .await;
 }

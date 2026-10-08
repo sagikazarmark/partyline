@@ -49,12 +49,15 @@
 //! PartyServer or partysocket.
 
 use std::cell::{Cell, RefCell};
+use std::fmt::Display;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures::StreamExt;
+use futures::future::LocalBoxFuture;
 use partyline_client::{ClientEvent, ConnectOptions, Handle};
 
 pub use partyline::{Channel, ClientConfig, Cursor, Mode, Status, StopReason};
@@ -170,6 +173,14 @@ pub enum ChannelMessage<E> {
     Reset,
 }
 
+/// What the shared hook delivers to the hook built on it.
+enum HookEvent<E> {
+    /// A message from the driver.
+    Client(ClientEvent<E>),
+    /// The channel ID changed. Discard the old channel's state.
+    Switched,
+}
+
 /// What the driver is started with. A change restarts it.
 #[derive(Clone, PartialEq)]
 struct Target {
@@ -267,7 +278,7 @@ fn latest_token(current: Arc<Mutex<Option<TokenProvider>>>) -> TokenProvider {
 
 fn use_channel_events<C: Channel>(
     options: ChannelOptions,
-    on_event: Callback<ClientEvent<C::Event>>,
+    on_event: Callback<HookEvent<C::Event>>,
 ) -> UseChannel {
     // Reading the settings subscribes the component, so a provider change is seen here.
     let settings = try_use_context::<Signal<PartylineSettings>>()
@@ -307,6 +318,7 @@ fn use_channel_events<C: Channel>(
         state.generation += 1;
         let generation = state.generation;
         let same_channel = state.id.as_deref() == Some(target.id.as_str());
+        let switched = state.id.is_some() && !same_channel;
         // A restart of the same channel resumes from the current cursor.
         let start = if same_channel {
             *cursor.peek()
@@ -344,6 +356,9 @@ fn use_channel_events<C: Channel>(
 
         let driver = driver.clone();
         spawn(async move {
+            if switched && driver.borrow().generation == generation {
+                on_event.call(HookEvent::Switched);
+            }
             let Some((handle, mut events)) = connection else {
                 return;
             };
@@ -364,7 +379,7 @@ fn use_channel_events<C: Channel>(
                         }
                     }
                 }
-                on_event.call(event);
+                on_event.call(HookEvent::Client(event));
             }
         });
     }));
@@ -385,100 +400,193 @@ pub fn use_channel<C: Channel>(
     options: ChannelOptions,
     mut on_message: impl FnMut(ChannelMessage<C::Event>) + 'static,
 ) -> UseChannel {
-    let callback = use_callback(move |event: ClientEvent<C::Event>| match event {
-        ClientEvent::Event { event, .. } => on_message(ChannelMessage::Event(event)),
-        ClientEvent::Reset => on_message(ChannelMessage::Reset),
-        ClientEvent::Status(_) => {}
+    let callback = use_callback(move |event: HookEvent<C::Event>| match event {
+        HookEvent::Client(ClientEvent::Event { event, .. }) => {
+            on_message(ChannelMessage::Event(event))
+        }
+        HookEvent::Client(ClientEvent::Reset) => on_message(ChannelMessage::Reset),
+        HookEvent::Client(ClientEvent::Status(_)) | HookEvent::Switched => {}
     });
     use_channel_events::<C>(options, callback)
 }
 
 /// Subscribes to a [`Mode::Latest`] channel and keeps its latest value in a signal.
 ///
-/// The value is `None` until the first event arrives. A Latest channel sends its current
-/// value on connect, so this needs no initial fetch.
+/// The value is `None` until the first event arrives, and again after the channel ID
+/// changes. A Latest channel sends its current value on connect, so this needs no initial
+/// fetch.
 pub fn use_channel_latest<C: Channel>(
     options: ChannelOptions,
 ) -> (ReadSignal<Option<C::Event>>, UseChannel) {
     let mut value = use_signal(|| None);
-    let callback = use_callback(move |event: ClientEvent<C::Event>| {
-        if let ClientEvent::Event { event, .. } = event {
-            value.set(Some(event));
-        }
+    let callback = use_callback(move |event: HookEvent<C::Event>| match event {
+        HookEvent::Client(ClientEvent::Event { event, .. }) => value.set(Some(event)),
+        HookEvent::Switched => value.set(None),
+        HookEvent::Client(_) => {}
     });
     let channel = use_channel_events::<C>(options, callback);
     (ReadSignal::new(value), channel)
 }
 
+/// The first delay before a failed refetch is retried.
+const REFETCH_RETRY_BASE: Duration = Duration::from_secs(1);
+/// The largest delay before a failed refetch is retried.
+const REFETCH_RETRY_CAP: Duration = Duration::from_secs(30);
+
 /// Subscribes to a [`Mode::Log`] channel and folds its events into state.
 ///
-/// - `initial` builds the starting state, which matches `since` in `options`.
+/// - `initial` builds the starting state, which matches `since` in `options`. It runs on
+///   mount, and again when the channel ID changes.
 /// - `reduce` applies one event.
 /// - `refetch` loads fresh state after a reset and returns it with the channel head it was
 ///   read at. Events that arrive during the refetch are buffered, and the ones after that
 ///   head are applied to the fresh state, so none is lost or applied twice. The returned
 ///   head must not be older than the reset, which holds for any read that starts after
 ///   the reset arrives.
-pub fn use_channel_reducer<C, S, F, Fut>(
+///
+/// A failed refetch is logged with `tracing` and retried after 1 s, doubling up to 30 s,
+/// while events stay buffered. A newer reset, a change of channel ID, or unmounting
+/// cancels it, and a result that arrives after that is discarded.
+///
+/// The latest closures passed are the ones called.
+pub fn use_channel_reducer<C, S, E, F, Fut>(
     options: ChannelOptions,
-    initial: impl FnOnce() -> S,
-    mut reduce: impl FnMut(&mut S, C::Event) + 'static,
+    mut initial: impl FnMut() -> S + 'static,
+    reduce: impl FnMut(&mut S, C::Event) + 'static,
     mut refetch: F,
 ) -> (ReadSignal<S>, UseChannel)
 where
     C: Channel,
     S: 'static,
+    E: Display + 'static,
     F: FnMut() -> Fut + 'static,
-    Fut: Future<Output = (S, Cursor)> + 'static,
+    Fut: Future<Output = Result<(S, Cursor), E>> + 'static,
 {
-    let mut state = use_signal(initial);
-    // `Some` while a refetch runs: the events received since the reset.
-    let buffer: Shared<Option<Buffered<C::Event>>> = use_hook(|| Rc::new(RefCell::new(None)));
-    let refetches = use_hook(|| Rc::new(RefCell::new(0u64)));
-    // The latest reducer, shared by the event handler and a refetch in flight.
-    let reducer: Shared<Option<Reducer<S, C::Event>>> = use_hook(|| Rc::new(RefCell::new(None)));
-    *reducer.borrow_mut() = Some(Box::new(move |s: &mut S, e| reduce(s, e)));
+    let mut state = use_signal(&mut initial);
+    let refetching: Shared<Refetching<C::Event>> = use_hook(Rc::default);
+    // The latest closures, shared by the event handler and a refetch in flight.
+    let closures: Shared<Option<Closures<S, C::Event, E>>> = use_hook(Rc::default);
+    *closures.borrow_mut() = Some(Closures {
+        initial: Box::new(initial),
+        reduce: Box::new(reduce),
+        refetch: Box::new(move || Box::pin(refetch())),
+    });
 
-    let callback = use_callback(move |event: ClientEvent<C::Event>| match event {
-        ClientEvent::Event { seq, event } => {
-            if let Some(buffered) = buffer.borrow_mut().as_mut() {
-                buffered.push((seq, event));
+    let callback = use_callback(move |event: HookEvent<C::Event>| match event {
+        HookEvent::Client(ClientEvent::Event { epoch, seq, event }) => {
+            if let Some(buffer) = refetching.borrow_mut().buffer.as_mut() {
+                buffer.push((epoch, seq, event));
                 return;
             }
-            if let Some(reduce) = reducer.borrow_mut().as_mut() {
-                state.with_mut(|s| reduce(s, event));
+            if let Some(c) = closures.borrow_mut().as_mut() {
+                state.with_mut(|s| (c.reduce)(s, event));
             }
         }
-        ClientEvent::Reset => {
-            *buffer.borrow_mut() = Some(Vec::new());
-            *refetches.borrow_mut() += 1;
-            let generation = *refetches.borrow();
-            let fetch = refetch();
-            let buffer = buffer.clone();
-            let refetches = refetches.clone();
-            let reducer = reducer.clone();
-            spawn(async move {
-                let (mut fresh, head) = fetch.await;
-                if *refetches.borrow() != generation {
-                    return; // A newer reset started another refetch.
-                }
-                let buffered = buffer.borrow_mut().take().unwrap_or_default();
-                if let Some(reduce) = reducer.borrow_mut().as_mut() {
-                    for (seq, event) in buffered {
-                        if seq > head.seq {
-                            reduce(&mut fresh, event);
-                        }
-                    }
-                }
-                state.set(fresh);
-            });
+        HookEvent::Client(ClientEvent::Reset) => {
+            let generation = refetching.borrow_mut().begin();
+            spawn(refetch_until_done(
+                generation,
+                refetching.clone(),
+                closures.clone(),
+                state,
+            ));
         }
-        ClientEvent::Status(_) => {}
+        HookEvent::Client(ClientEvent::Status(_)) => {}
+        HookEvent::Switched => {
+            // Cancel a refetch for the old channel and start over.
+            refetching.borrow_mut().cancel();
+            let fresh = closures.borrow_mut().as_mut().map(|c| (c.initial)());
+            if let Some(fresh) = fresh {
+                state.set(fresh);
+            }
+        }
     });
     let channel = use_channel_events::<C>(options, callback);
     (ReadSignal::new(state), channel)
 }
 
-type Reducer<S, E> = Box<dyn FnMut(&mut S, E)>;
+/// Runs a refetch, retrying with backoff, until it succeeds or a newer one replaces it.
+async fn refetch_until_done<S: 'static, Ev: 'static, E: Display + 'static>(
+    generation: u64,
+    refetching: Shared<Refetching<Ev>>,
+    closures: Shared<Option<Closures<S, Ev, E>>>,
+    mut state: Signal<S>,
+) {
+    let current = || refetching.borrow().generation == generation;
+    let mut delay = REFETCH_RETRY_BASE;
+    loop {
+        let Some(fetch) = closures.borrow_mut().as_mut().map(|c| (c.refetch)()) else {
+            return;
+        };
+        let result = fetch.await;
+        if !current() {
+            return; // A newer reset or a channel switch.
+        }
+        match result {
+            Ok((mut fresh, head)) => {
+                let buffered = refetching.borrow_mut().buffer.take().unwrap_or_default();
+                if let Some(c) = closures.borrow_mut().as_mut() {
+                    for (epoch, seq, event) in buffered {
+                        if epoch == head.epoch && seq > head.seq {
+                            (c.reduce)(&mut fresh, event);
+                        }
+                    }
+                }
+                state.set(fresh);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("partyline: refetch failed, retrying in {delay:?}: {error}");
+                futures_timer::Delay::new(delay).await;
+                delay = (delay * 2).min(REFETCH_RETRY_CAP);
+                if !current() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The app's closures for [`use_channel_reducer`].
+struct Closures<S, Ev, E> {
+    initial: Box<dyn FnMut() -> S>,
+    reduce: Reducer<S, Ev>,
+    refetch: Refetcher<S, E>,
+}
+
 type Shared<T> = Rc<RefCell<T>>;
-type Buffered<E> = Vec<(u64, E)>;
+type Reducer<S, Ev> = Box<dyn FnMut(&mut S, Ev)>;
+type Refetcher<S, E> = Box<dyn FnMut() -> LocalBoxFuture<'static, Result<(S, Cursor), E>>>;
+
+/// The refetch in flight, if any.
+struct Refetching<Ev> {
+    /// Bumped by every reset and channel switch. A refetch with an older one is discarded.
+    generation: u64,
+    /// `Some` while a refetch runs: the events received since the reset, with their epoch
+    /// and sequence number.
+    buffer: Option<Vec<(u64, u64, Ev)>>,
+}
+
+impl<Ev> Default for Refetching<Ev> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            buffer: None,
+        }
+    }
+}
+
+impl<Ev> Refetching<Ev> {
+    /// Starts buffering for a new refetch and returns its generation.
+    fn begin(&mut self) -> u64 {
+        self.generation += 1;
+        self.buffer = Some(Vec::new());
+        self.generation
+    }
+
+    /// Cancels the refetch in flight and drops its buffer.
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.buffer = None;
+    }
+}

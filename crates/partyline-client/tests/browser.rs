@@ -97,7 +97,7 @@ async fn driver_receives_a_published_event() {
         .send()
         .await;
     let event = loop {
-        if let Some(ClientEvent::Event { seq, event }) = events.next().await {
+        if let Some(ClientEvent::Event { seq, event, .. }) = events.next().await {
             assert_eq!(seq, 1);
             break event;
         }

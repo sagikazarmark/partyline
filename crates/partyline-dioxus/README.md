@@ -48,6 +48,21 @@ On web the base URL defaults to the page origin, so most apps configure nothing.
 
 A client that receives an event it cannot decode stops with `Stopped { reason: StopReason::Incompatible { .. } }` instead of reconnecting. The app is older than the server: ask the user to reload.
 
+## Reducer
+
+`use_channel_reducer` folds events into state, and refetches the state after a reset:
+
+```rust
+let (order, channel) = use_channel_reducer::<Orders, Order, _, _, _>(
+    ChannelOptions::new(id.clone()).since(head),
+    move || initial.clone(),                      // the state at `since`, again after an ID change
+    |order, event| order.apply(&event),
+    move || fetch_order(id.clone()),               // Result<(Order, Cursor), impl Display>
+);
+```
+
+Events that arrive during a refetch are buffered and applied to the fresh state when they are newer than its head. A failed refetch is logged with `tracing` and retried after 1 s, doubling up to 30 s. A change of channel ID resets the state with `initial` and discards a refetch in flight.
+
 Two components that subscribe to the same channel open two sockets in 0.1.
 
 ## License

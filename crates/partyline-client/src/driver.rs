@@ -176,7 +176,10 @@ pub(crate) async fn run<C: Channel, T: Transport>(
                     timers.insert(id, Delay::new(after));
                 }
                 Output::Event { seq, event } => {
-                    let _ = events.unbounded_send(ClientEvent::Event { seq, event });
+                    // The outputs of one input come from one frame, so the cursor is at
+                    // this event.
+                    let epoch = client.cursor().map_or(0, |c| c.epoch);
+                    let _ = events.unbounded_send(ClientEvent::Event { epoch, seq, event });
                 }
                 Output::Reset => {
                     let _ = events.unbounded_send(ClientEvent::Reset);

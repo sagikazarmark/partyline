@@ -2117,11 +2117,13 @@ version = "0.2.0"
 dependencies = [
  "dioxus",
  "futures",
+ "futures-timer",
  "partyline",
  "partyline-client",
  "serde",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

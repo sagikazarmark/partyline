@@ -254,7 +254,7 @@ async fn driver_resumes_after_connection_loss() {
     }
     let mut seen = Vec::new();
     while seen.len() < 3 {
-        if let ClientEvent::Event { seq, event } = next_event(&mut events).await {
+        if let ClientEvent::Event { seq, event, .. } = next_event(&mut events).await {
             assert_eq!(seq, event);
             seen.push(seq);
         }

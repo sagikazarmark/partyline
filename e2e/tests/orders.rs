@@ -275,7 +275,7 @@ async fn the_real_client_goes_offline_and_resumes() {
     let (handle, mut events) = client(&base, &id, cursor);
     let mut seen = Vec::new();
     while seen.len() < 3 {
-        if let ClientEvent::Event { seq, event } =
+        if let ClientEvent::Event { seq, event, .. } =
             wait_for(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await
         {
             seen.push((seq, event));
@@ -322,9 +322,11 @@ async fn ids_with_reserved_characters_reach_one_durable_object() {
     wait_for(&mut events, |e| *e == ClientEvent::Status(Status::Open)).await;
     publish(&base, &id, &note(2)).await;
     let event = wait_for(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await;
+    let head = snapshot(&base, &id).await.head;
     assert_eq!(
         event,
         ClientEvent::Event {
+            epoch: head.epoch,
             seq: 2,
             event: note(2)
         }

@@ -225,6 +225,9 @@ impl ConnectOptions {
 pub enum ClientEvent<E> {
     /// An event, delivered once and in order.
     Event {
+        /// The epoch of the log the event belongs to. It changes when the server wipes its
+        /// log.
+        epoch: u64,
         /// The sequence number.
         seq: u64,
         /// The event.

@@ -278,7 +278,14 @@ async fn the_real_client_receives_reset_after_a_channel_reset() {
     assert_eq!(handle.cursor(), Some(new_head));
     publish(&base, &id, 9).await;
     let event = next_event(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await;
-    assert_eq!(event, ClientEvent::Event { seq: 1, event: 9 });
+    assert_eq!(
+        event,
+        ClientEvent::Event {
+            epoch: new_head.epoch,
+            seq: 1,
+            event: 9
+        }
+    );
     handle.stop();
 }
 
@@ -309,6 +316,7 @@ async fn get_text(base: &str, path: &str) -> String {
         .await
         .unwrap()
 }
+
 #[tokio::test]
 async fn the_token_is_stripped_but_the_cursor_is_kept() {
     let Some(base) = base() else { return };
