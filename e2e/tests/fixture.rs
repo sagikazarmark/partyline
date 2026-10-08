@@ -283,6 +283,26 @@ async fn the_real_client_receives_reset_after_a_channel_reset() {
 }
 
 #[tokio::test]
+async fn the_token_is_stripped_but_the_cursor_is_kept() {
+    let Some(base) = base() else { return };
+    let id = unique("token");
+    let head = publish(&base, &id, 1).await;
+    publish(&base, &id, 2).await;
+    let mut ws = open_with(
+        &base,
+        &id,
+        Some(Cursor::new(head.epoch, 1)),
+        "&token=secret%20token",
+    )
+    .await;
+    hello(&mut ws).await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+}
+
+#[tokio::test]
 async fn non_ascii_tags_work_and_invalid_tags_are_refused() {
     let Some(base) = base() else { return };
     let id = unique("tags-utf8");

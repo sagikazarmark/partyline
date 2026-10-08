@@ -69,6 +69,7 @@ Publisher::<Orders>::new(&env, "ORDER_CHANNEL")?
 | Retention, Latest mode | 1 event |
 | Target event size | Under 16 KB. Send IDs and let the client fetch large payloads |
 
+`Connect::forward` removes the `token` query parameter before it forwards the upgrade, so tokens stay out of the Durable Object's request logs.
 One Durable Object accepts at most 32,768 WebSocket connections.
 A socket carries at most 10 tags of at most 256 characters each.
 

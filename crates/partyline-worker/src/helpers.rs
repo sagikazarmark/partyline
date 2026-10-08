@@ -58,6 +58,9 @@ impl<C: Channel> Connect<C> {
     }
 
     /// Forwards the upgrade request and returns the Durable Object's `101` response.
+    ///
+    /// The `token` query parameter is removed first. The Worker has already checked it, and
+    /// it would otherwise show up in the Durable Object's request logs.
     pub async fn forward(self, env: &Env, binding: &str, req: Request) -> worker::Result<Response> {
         if !is_upgrade(&req) {
             return Response::error("Expected a WebSocket upgrade", 426);
@@ -80,9 +83,11 @@ impl<C: Channel> Connect<C> {
             // Header values must be ASCII, and tags are often names.
             headers.set(TAGS_HEADER, &encode_segment(&tags))?;
         }
+        let mut url = req.url()?;
+        strip_token(&mut url);
         let mut init = RequestInit::new();
         init.with_method(Method::Get).with_headers(headers);
-        let forwarded = Request::new_with_init(req.url()?.as_str(), &init)?;
+        let forwarded = Request::new_with_init(url.as_str(), &init)?;
         let namespace = env.durable_object(binding)?;
         stub(&namespace, &self.id)?
             .fetch_with_request(forwarded)
@@ -192,6 +197,18 @@ impl<C: Channel> Publisher<C> {
     }
 }
 
+/// Removes the `token` query parameter, keeping the others exactly as encoded.
+fn strip_token(url: &mut worker::Url) {
+    let Some(query) = url.query() else {
+        return;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key) != "token")
+        .collect();
+    let kept = kept.join("&");
+    url.set_query((!kept.is_empty()).then_some(kept.as_str()));
+}
 fn parse_cursor(text: &str) -> worker::Result<Cursor> {
     text.trim()
         .parse()
@@ -215,4 +232,28 @@ pub fn reject(code: u16, reason: &str) -> worker::Result<Response> {
     pair.server.accept()?;
     pair.server.close(Some(code), Some(close_reason(reason)))?;
     Response::from_websocket(pair.client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_token_keeps_the_other_parameters() {
+        let strip = |s: &str| {
+            let mut url = worker::Url::parse(s).unwrap();
+            strip_token(&mut url);
+            url.to_string()
+        };
+        assert_eq!(
+            strip("https://a/partyline/c/1?v=1&token=secret&cursor=2.3"),
+            "https://a/partyline/c/1?v=1&cursor=2.3"
+        );
+        assert_eq!(
+            strip("https://a/partyline/c/1?token=x"),
+            "https://a/partyline/c/1"
+        );
+        assert_eq!(strip("https://a/p?v=1&x=a%20b"), "https://a/p?v=1&x=a%20b");
+        assert_eq!(strip("https://a/p"), "https://a/p");
+    }
 }
