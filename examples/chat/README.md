@@ -38,7 +38,13 @@ The page reads the channel head, and connects with `since` set 50 messages befor
 
 ## Run it
 
-Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
+With Docker and the Dagger CLI, one command builds and runs everything, with a development `SESSION_SECRET`:
+
+```shell
+dagger call examples chat service up --ports 8787:8787
+```
+
+Or by hand. Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
 
 ```shell
 # From the workspace root. `dx` fails inside a member directory.

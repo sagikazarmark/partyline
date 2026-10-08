@@ -146,6 +146,7 @@ For contributors: [Testing](docs/testing.md) and the design records: the [implem
 cargo test                                            # layers 1-3 (native)
 cargo check --workspace --target wasm32-unknown-unknown
 dagger check examples                                 # layers 3 (browser) and 4, MSRV, and the Markdown link check
+dagger call examples orders service up --ports 8787:8787   # run an example on http://localhost:8787
 ```
 
 The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI builds on it.

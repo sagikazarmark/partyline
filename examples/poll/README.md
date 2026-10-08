@@ -45,7 +45,13 @@ A vote travels over HTTP: the phone sends `POST /api/polls/{id}/vote`, `PollObje
 
 ## Run it
 
-Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
+With Docker and the Dagger CLI, one command builds and runs everything:
+
+```shell
+dagger call examples poll service up --ports 8787:8787
+```
+
+Or by hand. Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
 
 ```shell
 # From the workspace root. `dx` fails inside a member directory.
@@ -109,6 +115,7 @@ The demo needs no secrets, no KV namespace, and no D1 database.
 4. After a deploy that changes the hub, run the [manual hibernation check](../../docs/testing.md#manual-hibernation-check) and the [phone matrix](../../docs/testing.md#layer-5-phone-matrix).
 
 The demo resets itself every day at midnight UTC, from `PollObject`'s alarm. Press "Reset demo" in the presenter view to reset it at once.
+
 ## Styles
 
 The web client uses [Tailwind CSS](https://tailwindcss.com/) v4 through the built-in support in the Dioxus CLI.

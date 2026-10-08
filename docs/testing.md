@@ -36,7 +36,7 @@ Both run in containers with Dagger, so they need only Docker and the Dagger CLI.
 
 `dagger check -l` lists every check.
 
-Run an example locally with `dagger call examples orders service up --ports 8787:8787`.
+Run an example locally with `dagger call examples orders service up --ports 8787:8787`. See [Run the examples locally](how-to/run-examples-locally.md).
 Deploy one with `dagger call examples poll deploy --account-id <id> --api-token env://CLOUDFLARE_API_TOKEN`.
 
 The link check uses [lychee](https://lychee.cli.rs). To run it without Dagger:

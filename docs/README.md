@@ -26,6 +26,7 @@ Each guide solves one task. They assume you have finished the tutorial or read [
 | [Test your app with the loopback harness](how-to/test-your-app-with-loopback.md) | Test your client logic under dropped connections, offline |
 | [Debug a connection](how-to/debug-a-connection.md) | Find out why a client does not connect, or stops |
 | [Deploy to Cloudflare](how-to/deploy-to-cloudflare.md) | Deploy a partyline Worker: migrations, secrets, a custom domain, rate limits |
+| [Run the examples locally](how-to/run-examples-locally.md) | Run an example with one command |
 
 ## Explanation
 

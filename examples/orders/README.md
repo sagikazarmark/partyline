@@ -13,7 +13,13 @@ The smallest partyline app: follow an order's status and notes live. It is the s
 
 ## Run it
 
-Requirements: `worker-build` (`cargo install worker-build`), Node.js, and the Dioxus CLI.
+With Docker and the Dagger CLI, one command builds and runs everything:
+
+```shell
+dagger call examples orders service up --ports 8787:8787
+```
+
+Or by hand. Requirements: `worker-build` (`cargo install worker-build`), Node.js, and the Dioxus CLI.
 
 ```shell
 # From the workspace root: build the web client into the Worker's assets.
