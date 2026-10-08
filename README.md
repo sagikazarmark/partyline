@@ -136,7 +136,6 @@ The [documentation index](docs/README.md) lists every page. Good places to start
 - [Choosing a mode](docs/explanation/choosing-a-mode.md)
 - [Protocol reference](docs/protocol.md)
 - [How to authenticate connections with Clerk](docs/how-to/authenticate-with-clerk.md)
-- [Changelog](CHANGELOG.md)
 
 For contributors: [Testing](docs/testing.md) and the design records: the [implementation plan](docs/design/plan.md) and the [M0 spike notes](docs/design/m0-spike.md).
 

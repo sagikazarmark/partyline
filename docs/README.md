@@ -44,7 +44,6 @@ Each guide solves one task. They assume you have finished the tutorial or read [
 | --- | --- |
 | [Protocol](protocol.md) | The wire protocol: connect URL, frames, close codes, timing. Includes how to write a client in another language |
 | API documentation on docs.rs | [`partyline`](https://docs.rs/partyline), [`partyline-worker`](https://docs.rs/partyline-worker), [`partyline-client`](https://docs.rs/partyline-client), [`partyline-dioxus`](https://docs.rs/partyline-dioxus) |
-| [Changelog](../CHANGELOG.md) | Changes in each release |
 
 ## For contributors
 

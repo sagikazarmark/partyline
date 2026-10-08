@@ -600,7 +600,7 @@ The demo is built in M4 and replaces the example app as the phone-matrix target.
 One Cargo workspace holds the four crates. They share one version and are released together, with one `v{version}` tag.
 
 - **Lockstep.** The crates share the wire protocol and the core types, so a change in one usually needs a release of the others.
-- **One tag.** One tag and one changelog entry cover a release.
+- **One tag.** One tag and one set of release notes cover a release.
 - **Simple for users.** An app uses the same version of every partyline crate, and needs no compatibility table.
 
 A breaking change in `dioxus` or `worker` therefore bumps every crate. This is accepted while all four are 0.x.
