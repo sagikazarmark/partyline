@@ -67,7 +67,8 @@ Publisher::<Orders>::new(&env, "ORDER_CHANNEL")?
 | --- | --- |
 | Retention, Log mode | 1,000 events or 24 hours, whichever is smaller |
 | Retention, Latest mode | 1 event |
-| Target event size | Under 16 KB. Send IDs and let the client fetch large payloads |
+| Largest event | 64 KiB, set with `HubConfig::max_event_bytes`. Aim for under 16 KB: send IDs and let the client fetch large payloads |
+| Largest replay | 8 MiB, set with `HubConfig::max_replay_bytes`. A client further behind gets `Reset` |
 
 `Connect::forward` removes the `token` query parameter before it forwards the upgrade, so tokens stay out of the Durable Object's request logs.
 One Durable Object accepts at most 32,768 WebSocket connections.

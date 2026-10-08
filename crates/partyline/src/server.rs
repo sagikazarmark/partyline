@@ -69,6 +69,30 @@ impl Retention {
     }
 }
 
+/// Size limits on events and replays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The largest encoded event a publish accepts, in bytes.
+    pub max_event_bytes: usize,
+    /// The most event bytes a reconnect replays. A longer replay gets `Reset` instead, and
+    /// the client refetches.
+    pub max_replay_bytes: usize,
+}
+
+impl Limits {
+    /// The defaults: 64 KiB per event and 8 MiB per replay.
+    pub const DEFAULT: Self = Self {
+        max_event_bytes: 64 * 1024,
+        max_replay_bytes: 8 * 1024 * 1024,
+    };
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Storage for a channel's event log.
 ///
 /// Sequence numbers start at 1 and increase by 1 per append. Trimming only removes events
@@ -151,21 +175,40 @@ pub enum ServerError<E> {
     /// An event could not be encoded or decoded.
     #[error(transparent)]
     Codec(#[from] CodecError),
+    /// An event is larger than [`Limits::max_event_bytes`].
+    #[error("event is {size} bytes, more than the limit of {max}")]
+    TooLarge {
+        /// The size of the encoded event.
+        size: usize,
+        /// The limit.
+        max: usize,
+    },
+}
+
+/// Builds every frame a new connection receives, with the default [`Limits`]. See
+/// [`handshake_with`].
+pub fn handshake<L: Log + ?Sized>(
+    mode: Mode,
+    since: Option<Cursor>,
+    log: &L,
+) -> Result<Vec<String>, ServerError<L::Error>> {
+    handshake_with(mode, since, log, &Limits::DEFAULT)
 }
 
 /// Builds every frame a new connection receives, in order: `Hello`, then the replay,
 /// the latest event, or `Reset`.
 ///
 /// A replay is sent only when the retained events after the cursor run without a gap up to
-/// the head. Otherwise the client gets `Reset`, and the refetch that follows is always
-/// correct.
+/// the head and fit in [`Limits::max_replay_bytes`]. Otherwise the client gets `Reset`, and
+/// the refetch that follows is always correct.
 ///
 /// The caller must send all of them without yielding to other work, so that no publish
 /// lands between the replay and live events.
-pub fn handshake<L: Log + ?Sized>(
+pub fn handshake_with<L: Log + ?Sized>(
     mode: Mode,
     since: Option<Cursor>,
     log: &L,
+    limits: &Limits,
 ) -> Result<Vec<String>, ServerError<L::Error>> {
     let head = log.head().map_err(ServerError::Log)?;
     let mut frames = vec![codec::encode_frame::<()>(&ServerFrame::Hello {
@@ -178,7 +221,7 @@ pub fn handshake<L: Log + ?Sized>(
         OnConnect::LiveOnly => {}
         OnConnect::Replay { after } => {
             let rows = log.range(after).map_err(ServerError::Log)?;
-            if is_replayable(&rows, after, head.seq) {
+            if is_replayable(&rows, after, head.seq, limits) {
                 for (seq, body) in rows {
                     frames.push(codec::event_frame(seq, &body)?);
                 }
@@ -197,25 +240,40 @@ pub fn handshake<L: Log + ?Sized>(
     Ok(frames)
 }
 
-/// Reports whether `rows` are exactly the events `after + 1 ..= head`.
-fn is_replayable(rows: &[(u64, Vec<u8>)], after: u64, head: u64) -> bool {
-    rows.len() as u64 == head - after
+/// Reports whether `rows` are exactly the events `after + 1 ..= head`, and fit the replay limit.
+fn is_replayable(rows: &[(u64, Vec<u8>)], after: u64, head: u64, limits: &Limits) -> bool {
+    let complete = rows.len() as u64 == head - after
         && rows
             .iter()
             .zip(after + 1..)
-            .all(|((seq, _), expected)| *seq == expected)
+            .all(|((seq, _), expected)| *seq == expected);
+    let bytes: usize = rows.iter().map(|(_, body)| body.len()).sum();
+    complete && bytes <= limits.max_replay_bytes
 }
 
-/// Appends an encoded event, trims the log, and returns the new head and the `Event` frame
-/// text to send to every socket.
-///
-/// The body is validated as an encoded event before it is stored.
+/// Appends an encoded event with the default [`Limits`]. See [`publish_with`].
 pub fn publish<L: Log + ?Sized>(
     log: &mut L,
     body: &[u8],
     retention: &Retention,
     now_ms: u64,
 ) -> Result<(Cursor, String), ServerError<L::Error>> {
+    publish_with(log, body, retention, &Limits::DEFAULT, now_ms)
+}
+
+/// Appends an encoded event, trims the log, and returns the new head and the `Event` frame
+/// text to send to every socket.
+///
+/// The body is checked against [`Limits::max_event_bytes`] and validated as an encoded
+/// event before it is stored.
+pub fn publish_with<L: Log + ?Sized>(
+    log: &mut L,
+    body: &[u8],
+    retention: &Retention,
+    limits: &Limits,
+    now_ms: u64,
+) -> Result<(Cursor, String), ServerError<L::Error>> {
+    check_size(body, limits)?;
     let next = log.head().map_err(ServerError::Log)?.seq + 1;
     // Building the frame first validates the body, so an invalid body is never stored.
     let frame = codec::event_frame(next, body)?;
@@ -224,6 +282,17 @@ pub fn publish<L: Log + ?Sized>(
     log.trim(retention, now_ms).map_err(ServerError::Log)?;
     let head = log.head().map_err(ServerError::Log)?;
     Ok((head, frame))
+}
+
+/// Checks an encoded event against [`Limits::max_event_bytes`].
+pub fn check_size<E>(body: &[u8], limits: &Limits) -> Result<(), ServerError<E>> {
+    if body.len() > limits.max_event_bytes {
+        return Err(ServerError::TooLarge {
+            size: body.len(),
+            max: limits.max_event_bytes,
+        });
+    }
+    Ok(())
 }
 
 /// An in-memory [`Log`], for tests and for backends that do not need durability.
@@ -493,6 +562,36 @@ mod tests {
         assert_eq!(frames[1], r#"{"t":"reset","head":"2.5"}"#);
         // A replay that skips the missing event is still sent.
         assert_eq!(handshake(Mode::Log, c(2, 3), &log).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn handshake_resets_when_the_replay_is_too_large() {
+        let log = log_with(2, 5);
+        let limits = Limits {
+            max_replay_bytes: 3,
+            ..Limits::DEFAULT
+        };
+        let frames = handshake_with(Mode::Log, c(2, 1), &log, &limits).unwrap();
+        assert_eq!(frames[1], r#"{"t":"reset","head":"2.5"}"#);
+        // Three one-byte events fit.
+        let frames = handshake_with(Mode::Log, c(2, 2), &log, &limits).unwrap();
+        assert_eq!(frames.len(), 4);
+    }
+
+    #[test]
+    fn publish_rejects_oversized_events() {
+        let mut log = MemLog::new(1);
+        let limits = Limits {
+            max_event_bytes: 4,
+            ..Limits::DEFAULT
+        };
+        let result = publish_with(&mut log, br#""abcd""#, &Retention::LATEST, &limits, 0);
+        assert!(matches!(
+            result,
+            Err(ServerError::TooLarge { size: 6, max: 4 })
+        ));
+        assert_eq!(log.head(), Ok(Cursor::new(1, 0)), "nothing is stored");
+        assert!(publish_with(&mut log, b"1234", &Retention::LATEST, &limits, 0).is_ok());
     }
 
     #[test]

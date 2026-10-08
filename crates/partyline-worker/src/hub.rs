@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use partyline::frame::{ConnectParams, PING, PONG, decode_segment};
-use partyline::server::{self, Log, Retention, ServerError};
+use partyline::server::{self, Limits, Log, Retention, ServerError};
 use partyline::{Channel, Cursor, Mode, close, codec};
 use worker::{
     Date, Method, Request, Response, ScheduledTime, State, WebSocket, WebSocketIncomingMessage,
@@ -31,6 +31,7 @@ const MAX_REASON_BYTES: usize = 123;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HubConfig {
     retention: Option<Retention>,
+    limits: Limits,
 }
 
 impl HubConfig {
@@ -49,12 +50,33 @@ impl HubConfig {
         self
     }
 
+    /// Rejects events larger than `n` bytes when encoded. Default: 64 KiB.
+    ///
+    /// A rejected publish returns HTTP 413 from the hub, and an error from
+    /// [`crate::Publisher::publish`] and [`Hub::publish`].
+    pub fn max_event_bytes(mut self, n: usize) -> Self {
+        self.limits.max_event_bytes = n;
+        self
+    }
+
+    /// Replays at most `n` bytes of events on reconnect. A client further behind gets
+    /// `Reset` and refetches. Default: 8 MiB.
+    pub fn max_replay_bytes(mut self, n: usize) -> Self {
+        self.limits.max_replay_bytes = n;
+        self
+    }
+
     /// The retention policy for a mode. [`Mode::Latest`] always keeps exactly one event.
     pub fn retention(&self, mode: Mode) -> Retention {
         match mode {
             Mode::Log => self.retention.unwrap_or(Retention::LOG_DEFAULT),
             Mode::Latest => Retention::LATEST,
         }
+    }
+
+    /// The size limits.
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 }
 
@@ -153,6 +175,7 @@ impl<C: Channel> Hub<C> {
                 match self.publish_raw(&body).await {
                     Ok(cursor) => Response::ok(cursor.to_string()),
                     Err(PublishError::Invalid(e)) => Response::error(e, 400),
+                    Err(PublishError::TooLarge(e)) => Response::error(e, 413),
                     Err(PublishError::Worker(e)) => Err(e),
                 }
             }
@@ -215,16 +238,25 @@ impl<C: Channel> Hub<C> {
             .collect();
         self.state.accept_websocket_with_tags(&pair.server, &tags);
 
-        match server::handshake(C::MODE, params.cursor, &self.log()) {
+        let limits = self.config.limits();
+        match server::handshake_with(C::MODE, params.cursor, &self.log(), &limits) {
             Ok(frames) => {
                 for frame in frames {
-                    pair.server.send_with_str(frame)?;
+                    if let Err(e) = pair.server.send_with_str(frame) {
+                        // The client reconnects and resumes from its cursor.
+                        worker::console_error!("partyline: handshake send failed: {e}");
+                        let _ = pair
+                            .server
+                            .close(Some(close::INTERNAL_ERROR), Some("send failed"));
+                        break;
+                    }
                 }
             }
             Err(e) => {
                 worker::console_error!("partyline: handshake failed: {e}");
-                pair.server
-                    .close(Some(close::INTERNAL_ERROR), Some("handshake failed"))?;
+                let _ = pair
+                    .server
+                    .close(Some(close::INTERNAL_ERROR), Some("handshake failed"));
             }
         }
         Response::from_websocket(pair.client)
@@ -240,15 +272,14 @@ impl<C: Channel> Hub<C> {
     }
 
     async fn publish_raw(&self, body: &[u8]) -> Result<Cursor, PublishError> {
+        let limits = self.config.limits();
+        server::check_size::<worker::Error>(body, &limits).map_err(PublishError::from_server)?;
         // Validate that the body is this channel's event type before storing it.
         codec::decode_event::<C::Event>(body).map_err(|e| PublishError::Invalid(e.to_string()))?;
         let retention = self.config.retention(C::MODE);
-        let now = now_ms();
         let (head, frame) =
-            server::publish(&mut self.log(), body, &retention, now).map_err(|e| match e {
-                ServerError::Log(e) => PublishError::Worker(e),
-                ServerError::Codec(e) => PublishError::Invalid(e.to_string()),
-            })?;
+            server::publish_with(&mut self.log(), body, &retention, &limits, now_ms())
+                .map_err(PublishError::from_server)?;
         for ws in self.state.get_websockets() {
             if ws.send_with_str(&frame).is_err() {
                 // The client resumes from its cursor when it reconnects.
@@ -354,13 +385,24 @@ impl<C: Channel> Hub<C> {
 
 enum PublishError {
     Invalid(String),
+    TooLarge(String),
     Worker(worker::Error),
 }
 
 impl PublishError {
+    fn from_server<E: Into<worker::Error>>(e: ServerError<E>) -> Self {
+        match e {
+            ServerError::Log(e) => Self::Worker(e.into()),
+            ServerError::Codec(e) => Self::Invalid(e.to_string()),
+            ServerError::TooLarge { size, max } => Self::TooLarge(format!(
+                "event is {size} bytes, more than the limit of {max}"
+            )),
+        }
+    }
+
     fn into_worker(self) -> worker::Error {
         match self {
-            Self::Invalid(e) => worker::Error::RustError(e),
+            Self::Invalid(e) | Self::TooLarge(e) => worker::Error::RustError(e),
             Self::Worker(e) => e,
         }
     }

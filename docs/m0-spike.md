@@ -48,6 +48,8 @@ The implementation follows the plan, with these changes. Each one came from a pr
 | Layout | The demo lives in `demo/` | `examples/poll`, next to `examples/orders` | Every runnable app lives in `examples/`. The poll is still the public demo |
 | Test hooks | Not specified | Test-only behavior (magic tokens, close-by-tag and reset routes) lives in the `e2e/fixture` Worker, not in the examples | Keeps `examples/orders` minimal and keeps those routes off public deployments |
 | Versioning | Each crate versioned and released on its own | One shared workspace version and one `v{version}` tag. 0.1.0 was tagged per crate; 0.2.0 is the first shared release | The crates move in lockstep because they share the wire protocol. One tag is simpler to release, and users match one version across all four crates |
+| Replay limit | No replay cap: retention bounds the replay | Retention, plus a byte budget: `HubConfig::max_replay_bytes`, 8 MiB by default. A longer replay, or a retained range with a hole, gets `Reset` | A Durable Object has 128 MB of memory, and a replay is built in one turn. A `Reset` and a refetch are always correct |
+| Event size | A target of 16 KB, not enforced | `HubConfig::max_event_bytes`, 64 KiB by default. A larger publish fails with HTTP 413 | A large event is a bug in the app. Failing the publish shows it at once |
 
 ## Tooling notes
 

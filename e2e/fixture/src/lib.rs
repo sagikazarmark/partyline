@@ -3,7 +3,8 @@
 //! - It routes through an axum `Router`, to check that `Connect::forward_http` passes
 //!   WebSocket upgrades through axum on Workers.
 //! - Its channel keeps at most 5 events for at most 3 seconds, to check count-based
-//!   trimming and the alarm that runs age-based trimming in SQLite.
+//!   trimming and the alarm that runs age-based trimming in SQLite. It accepts events of
+//!   at most 16 bytes, so a 17-digit number checks the size limit.
 //! - It holds the hooks that only tests need: magic tokens, socket tags from a query
 //!   parameter, and routes to close sockets by tag and to reset the channel. The examples
 //!   stay free of them.
@@ -44,7 +45,8 @@ partyline_worker::channel_object! {
     pub struct TickChannel: Ticks {
         config = HubConfig::default()
             .retain_events(5)
-            .retain_for(Some(Duration::from_secs(3)));
+            .retain_for(Some(Duration::from_secs(3)))
+            .max_event_bytes(16);
     }
 }
 

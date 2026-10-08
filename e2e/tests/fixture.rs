@@ -283,6 +283,33 @@ async fn the_real_client_receives_reset_after_a_channel_reset() {
 }
 
 #[tokio::test]
+async fn events_over_the_size_limit_are_rejected() {
+    let Some(base) = base() else { return };
+    let id = unique("size");
+    // The fixture accepts events of at most 16 bytes.
+    let head = publish(&base, &id, 1_234_567_890_123_456).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/ticks/{}", encode_segment(&id)))
+        .body("12345678901234567")
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success(), "{}", response.status());
+    let text = get_text(&base, &format!("/api/ticks/{}/head", encode_segment(&id))).await;
+    assert_eq!(text.parse::<Cursor>().unwrap(), head, "nothing is stored");
+}
+
+async fn get_text(base: &str, path: &str) -> String {
+    reqwest::get(format!("{base}{path}"))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+#[tokio::test]
 async fn the_token_is_stripped_but_the_cursor_is_kept() {
     let Some(base) = base() else { return };
     let id = unique("token");
