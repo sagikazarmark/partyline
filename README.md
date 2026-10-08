@@ -1,6 +1,6 @@
 # partyline
 
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/partyline/dagger.yaml?style=flat-square)](https://github.com/sagikazarmark/partyline/actions/workflows/dagger.yaml)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/partyline/ci.yaml?style=flat-square)](https://github.com/sagikazarmark/partyline/actions/workflows/ci.yaml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/sagikazarmark/partyline/badge?style=flat-square)](https://securityscorecards.dev/viewer/?uri=github.com/sagikazarmark/partyline)
 [![crates.io](https://img.shields.io/crates/v/partyline?style=flat-square)](https://crates.io/crates/partyline)
 [![docs.rs](https://img.shields.io/docsrs/partyline?style=flat-square)](https://docs.rs/partyline)
@@ -141,14 +141,18 @@ For contributors: [Testing](docs/testing.md) and the design records: the [implem
 
 ## Development
 
+The tools come from [devenv](https://devenv.sh): run the commands below in `devenv shell`. CI runs the same [just](https://just.systems) recipes.
+
 ```shell
-cargo test                                            # layers 1-3 (native)
-cargo check --workspace --target wasm32-unknown-unknown
-dagger check examples                                 # layers 3 (browser) and 4, MSRV, and the Markdown link check
-dagger call examples orders service up --ports 8787:8787   # run an example on http://localhost:8787
+just check                 # formatting, lints, layers 1-3 (native), and docs
+just e2e                   # layer 4, against the examples and the fixture under wrangler dev
+just examples e2e orders   # layer 4, against one example
+just browser               # layer 3 (browser), in headless Chrome
+just examples dev orders   # run an example on http://localhost:8787
+just                       # list every recipe
 ```
 
-The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI builds on it.
+The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI does not check it; see [Testing](docs/testing.md) to check it locally.
 
 The four crates share one version and are released together with `cargo release`, under one `v{version}` tag.
 

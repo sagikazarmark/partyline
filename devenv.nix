@@ -1,22 +1,30 @@
-{ pkgs, ... }:
+{ pkgs, multiverse, ... }:
 
 {
   dotenv.enable = true;
 
-  dagger = {
-    enable = true;
-    version = "v1.0.0-beta.15";
-
-    dang.enable = true;
-  };
-
   packages = with pkgs; [
     lld
+
+    just
+    # just-lsp
+    multiverse.just-lsp."0.10.0"
+
     cargo-audit
+    cargo-binstall
     cargo-deny
     cargo-dist
     cargo-release
     cargo-watch
+
+    multiverse.dioxus-cli."0.7.10"
+    multiverse.worker-build."0.8.7"
+    # wasm-bindgen-cli_0_2_129
+    multiverse.wasm-bindgen-cli."0.2.129"
+    wrangler
+
+    # Markdown link check
+    lychee
   ];
 
   languages = {
@@ -24,6 +32,15 @@
       enable = true;
       channel = "stable";
       targets = [ "wasm32-unknown-unknown" ];
+    };
+
+    javascript = {
+      enable = true;
+      npm.enable = true;
+    };
+
+    tailwindcss = {
+      enable = true;
     };
   };
 }

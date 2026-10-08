@@ -14,11 +14,13 @@ npx wrangler deploy
 
 `wrangler deploy` runs the `[build]` command (`worker-build --release`), uploads the Worker and the assets, and applies new migrations.
 
-To deploy an example from a container, without local tools, use Dagger:
+To build and deploy an example in one step, run this in `devenv shell` from the workspace root:
 
 ```shell
-dagger call examples poll deploy --account-id <account-id> --api-token env://CLOUDFLARE_API_TOKEN
+just examples deploy poll
 ```
+
+Wrangler uses your `wrangler login` session, or `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment.
 
 ## Durable Object migrations
 
@@ -105,7 +107,7 @@ Without `/partyline/*` in `run_worker_first`, upgrades get `index.html` and fail
 
 ## Compatibility date
 
-The examples pin `compatibility_date = "2026-09-01"`. CI also runs the end-to-end tests at 2025-04-01, the oldest date partyline is tested with.
+The examples pin `compatibility_date = "2026-09-01"`, the date partyline is tested with.
 Hibernation, the WebSocket auto-response, and close handling depend on compatibility flags, so test before you move an existing Worker to a much newer date.
 
 ## Before going public

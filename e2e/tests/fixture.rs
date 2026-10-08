@@ -1,7 +1,7 @@
 //! Layer 4, against the e2e fixture Worker: upgrades through an axum router, trimming in
 //! SQLite by count and by age, authorization close codes, closing by tag, and channel reset.
 //!
-//! Run with `dagger check examples:end-to-end`, which starts the fixture under `wrangler dev`
+//! Run with `just e2e-fixture`, which starts the fixture under `wrangler dev`
 //! and sets `PARTYLINE_E2E_FIXTURE_URL`. Without it, every test passes without
 //! doing anything.
 

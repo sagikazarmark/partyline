@@ -45,10 +45,10 @@ A vote travels over HTTP: the phone sends `POST /api/polls/{id}/vote`, `PollObje
 
 ## Run it
 
-With Docker and the Dagger CLI, one command builds and runs everything:
+In `devenv shell`, one command builds and runs everything:
 
 ```shell
-dagger call examples poll service up --ports 8787:8787
+just examples dev poll
 ```
 
 Or by hand. Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
@@ -59,6 +59,7 @@ dx bundle --package poll-web --platform web --release
 mkdir -p examples/poll/worker/public
 cp -r target/dx/poll-web/release/web/public/. examples/poll/worker/public/
 cd examples/poll/worker
+worker-build --release
 npx wrangler dev
 ```
 
@@ -91,15 +92,13 @@ The demo needs no secrets, no KV namespace, and no D1 database.
    routes = [{ pattern = "partyline.example.com", custom_domain = true }]
    ```
 
-2. Deploy with Dagger, which builds everything in containers:
+2. Build and deploy, in `devenv shell` from the workspace root:
 
    ```shell
-   dagger call examples poll deploy \
-     --account-id <account-id> \
-     --api-token env://CLOUDFLARE_API_TOKEN
+   just examples deploy poll
    ```
 
-   The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: DNS: Edit" for the custom domain.
+   Wrangler uses your `wrangler login` session, or `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment. The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: DNS: Edit" for the custom domain.
 
    Or by hand, from the workspace root:
 
@@ -108,6 +107,7 @@ The demo needs no secrets, no KV namespace, and no D1 database.
    mkdir -p examples/poll/worker/public
    cp -r target/dx/poll-web/release/web/public/. examples/poll/worker/public/
    cd examples/poll/worker
+   worker-build --release
    npx wrangler deploy
    ```
 

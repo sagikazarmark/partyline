@@ -1,6 +1,6 @@
 # How to run the examples locally
 
-This guide shows two ways to run an example on your machine: one Dagger command, or the tools by hand.
+This guide shows two ways to run an example on your machine: one `just` command, or the tools by hand.
 
 | Example | Open |
 | --- | --- |
@@ -8,29 +8,25 @@ This guide shows two ways to run an example on your machine: one Dagger command,
 | `chat` | <http://localhost:8787/> in two browsers |
 | `poll` | <http://localhost:8787/present> and <http://localhost:8787/> |
 
-## With Dagger: one command
+## With just: one command
 
-You need Docker and the [Dagger CLI](https://docs.dagger.io/install). Nothing else: Rust, `dx`, `worker-build`, and wrangler run in containers.
+You need [devenv](https://devenv.sh). It provides Rust, `dx`, `worker-build`, wrangler, and [just](https://just.systems). From the workspace root:
 
 ```shell
-dagger call examples orders service up --ports 8787:8787
+devenv shell
+just examples dev orders
 ```
 
 Replace `orders` with `chat` or `poll`. The command builds the Worker and the web client, then runs `wrangler dev` on port 8787 until you stop it with Ctrl-C.
-The first run takes several minutes. Later runs reuse the build cache.
+Pass another port as a second argument: `just examples dev chat 8788`.
 
-The chat example gets a development `SESSION_SECRET` from the Dagger module, so it needs no `.dev.vars`.
+For `chat`, the command copies `.dev.vars.example` to `.dev.vars` if `.dev.vars` does not exist, so the Worker has a development `SESSION_SECRET`.
 
-To run an example at another Workers compatibility date:
-
-```shell
-dagger call examples --compatibility-date 2025-04-01 orders service up --ports 8787:8787
-```
-
-To list everything the module can do:
+`just examples dev-all` runs all three at once, on ports 8787 (orders), 8788 (chat), and 8789 (poll).
+To list every recipe:
 
 ```shell
-dagger functions examples
+just --list examples
 ```
 
 ## By hand
@@ -44,14 +40,14 @@ mkdir -p examples/orders/worker/public
 cp -r target/dx/orders-web/release/web/public/. examples/orders/worker/public/
 
 cd examples/orders/worker
+worker-build --release
 npx wrangler dev
 ```
 
-For another example, replace `orders` in the three paths and in the package name.
+For another example, replace `orders` in the paths and in the package name.
 For `chat`, first copy `examples/chat/worker/.dev.vars.example` to `.dev.vars`.
 
-`wrangler dev` runs `worker-build` itself, from the `[build]` section of `wrangler.toml`.
-It does not pick up new assets while it runs: restart it after each web build.
+`wrangler dev` does not pick up new assets while it runs: restart it after each web build.
 
 ## Follow an order from the terminal
 
@@ -66,8 +62,14 @@ cargo run -p orders-tail -- http://localhost:8787 demo
 ## Run the end-to-end tests
 
 ```shell
-dagger check examples:end-to-end
+# Against the orders and chat examples and the e2e fixture
+just e2e
+
+# Against one example
+just examples e2e orders
 ```
+
+The tests run their Workers under `wrangler dev` on ports 8790 to 8792 and stop them when they end, so they do not clash with `just examples dev` on ports 8787 to 8789.
 
 See [Testing](../testing.md) for every test layer.
 

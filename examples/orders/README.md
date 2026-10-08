@@ -13,10 +13,10 @@ The smallest partyline app: follow an order's status and notes live. It is the s
 
 ## Run it
 
-With Docker and the Dagger CLI, one command builds and runs everything:
+In `devenv shell`, one command builds and runs everything:
 
 ```shell
-dagger call examples orders service up --ports 8787:8787
+just examples dev orders
 ```
 
 Or by hand. Requirements: `worker-build` (`cargo install worker-build`), Node.js, and the Dioxus CLI.
@@ -28,6 +28,7 @@ mkdir -p examples/orders/worker/public
 cp -r target/dx/orders-web/release/web/public/. examples/orders/worker/public/
 
 cd examples/orders/worker
+worker-build --release
 npx wrangler dev
 ```
 

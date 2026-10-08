@@ -5,7 +5,7 @@ It shows `partyline-client` on tokio, with the native transport, outside Dioxus.
 
 ## Run it
 
-Start the orders example first, for example with `dagger call examples orders service up --ports 8787:8787`. Then:
+Start the orders example first, for example with `just examples dev orders`. Then:
 
 ```shell
 cargo run -p orders-tail -- http://localhost:8787 demo

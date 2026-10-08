@@ -1,7 +1,7 @@
 //! Layer 4, against the chat example: sign-in, access tokens at upgrade, and sign-out
 //! closing a user's sockets by tag.
 //!
-//! Run with `dagger check examples:end-to-end`, which starts the chat example under
+//! Run with `just examples e2e chat`, which starts the chat example under
 //! `wrangler dev` and sets `PARTYLINE_E2E_CHAT_URL`. Without it, every test passes
 //! without doing anything.
 

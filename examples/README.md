@@ -9,10 +9,10 @@
 Each example has three crates: `shared` (the channels and event types), `worker` (the Worker and its Durable Objects), and `web` (the Dioxus client).
 `orders` has a fourth, [`tail`](orders/tail): a native command-line client on tokio that prints an order's events.
 
-Run any example with one command, with only Docker and the Dagger CLI installed:
+Run any example with one command, in `devenv shell` from the workspace root:
 
 ```shell
-dagger call examples orders service up --ports 8787:8787
+just examples dev orders
 ```
 
 Replace `orders` with `chat` or `poll`, then open <http://localhost:8787/>. See [how to run the examples locally](../docs/how-to/run-examples-locally.md) for the manual steps.

@@ -38,10 +38,10 @@ The page reads the channel head, and connects with `since` set 50 messages befor
 
 ## Run it
 
-With Docker and the Dagger CLI, one command builds and runs everything, with a development `SESSION_SECRET`:
+In `devenv shell`, one command builds and runs everything. It copies `.dev.vars.example` to `.dev.vars` first if `.dev.vars` does not exist:
 
 ```shell
-dagger call examples chat service up --ports 8787:8787
+just examples dev chat
 ```
 
 Or by hand. Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
@@ -53,6 +53,7 @@ mkdir -p examples/chat/worker/public
 cp -r target/dx/chat-web/release/web/public/. examples/chat/worker/public/
 cd examples/chat/worker
 cp .dev.vars.example .dev.vars
+worker-build --release
 npx wrangler dev
 ```
 

@@ -1,7 +1,7 @@
 //! Layer 4: the Durable Object, the SQLite log, and the Worker helpers in workerd.
 //!
-//! Run with `dagger check examples:end-to-end`, which starts the orders example under
-//! `wrangler dev` and sets `PARTYLINE_E2E_URL`. Without it, every test passes without
+//! Run with `just examples e2e orders`, which starts the orders example under
+//! `wrangler dev` and sets `PARTYLINE_E2E_ORDERS_URL`. Without it, every test passes without
 //! doing anything.
 
 use std::time::Duration;
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn base() -> Option<String> {
-    std::env::var("PARTYLINE_E2E_URL").ok()
+    std::env::var("PARTYLINE_E2E_ORDERS_URL").ok()
 }
 
 fn unique(prefix: &str) -> String {
