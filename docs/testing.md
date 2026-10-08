@@ -58,7 +58,7 @@ The server side of the harness calls the same `server::handshake` and `server::p
 
 Layer 4 cannot force hibernation locally. The hub is safe by construction, because it holds no state in memory. Confirm it once on a deployed Worker:
 
-1. Deploy the demo.
+1. [Deploy the demo](../examples/poll/README.md#deploy-the-demo).
 2. Open the phone view on one device. Wait until the badge shows "Live".
 3. Leave the socket idle for at least 5 minutes. The Durable Object hibernates after about 10 seconds without events.
 4. Vote from another device.

@@ -135,7 +135,6 @@ fn OrderStatus(id: String, initial: Order, head: Cursor) -> Element {
 - [How to authenticate connections with Clerk](docs/how-to/authenticate-with-clerk.md)
 - [Testing, including the manual hibernation check and the phone matrix](docs/testing.md)
 - [M0 spike notes: the `worker` API findings](docs/m0-spike.md)
-- [Releasing](docs/how-to/release.md)
 
 ## Development
 

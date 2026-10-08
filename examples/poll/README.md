@@ -58,8 +58,57 @@ npx wrangler dev
 
 Restart `wrangler dev` after each web build: it does not pick up new assets while it runs.
 
-Open <http://localhost:8787/present> and <http://localhost:8787/>. See [Releasing](../../docs/how-to/release.md#deploy-the-demo) to deploy it.
+Open <http://localhost:8787/present> and <http://localhost:8787/>. See [Deploy the demo](#deploy-the-demo) to deploy it.
 
+## Deploy the demo
+
+This example is the public demo. Deploy it after a release, so it runs the released code.
+
+### What it uses
+
+Taken from [`examples/poll/worker/wrangler.toml`](worker/wrangler.toml):
+
+| Resource | Configuration | Setup needed |
+| --- | --- | --- |
+| Durable Objects | `PollObject` and `ActivityChannel`, both in `new_sqlite_classes` of migration `v1` | None. `wrangler deploy` applies the migration |
+| Rate limiting | `VOTE_LIMITER`: 20 votes per client IP per 10 seconds | None. The binding is created on deploy |
+| Static assets | The web client in `./public` | Build it first, below |
+| Custom domain | Commented out in `routes` | Set your domain, below |
+
+The demo needs no secrets, no KV namespace, and no D1 database.
+
+### Steps
+
+1. Set the domain. In `examples/poll/worker/wrangler.toml`, uncomment the `routes` line and set your subdomain. The zone must be in the Cloudflare account you deploy to. Do not commit your domain if the repository is public and the domain is private.
+
+   ```toml
+   routes = [{ pattern = "partyline.example.com", custom_domain = true }]
+   ```
+
+2. Deploy with Dagger, which builds everything in containers:
+
+   ```shell
+   dagger call examples poll deploy \
+     --account-id <account-id> \
+     --api-token env://CLOUDFLARE_API_TOKEN
+   ```
+
+   The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: DNS: Edit" for the custom domain.
+
+   Or by hand, from the workspace root:
+
+   ```shell
+   dx bundle --package poll-web --platform web --release
+   mkdir -p examples/poll/worker/public
+   cp -r target/dx/poll-web/release/web/public/. examples/poll/worker/public/
+   cd examples/poll/worker
+   npx wrangler deploy
+   ```
+
+3. Open `/present` on the domain and vote from a phone.
+4. After a deploy that changes the hub, run the [manual hibernation check](../../docs/testing.md#manual-hibernation-check) and the [phone matrix](../../docs/testing.md#layer-5-phone-matrix).
+
+The demo resets itself every day at midnight UTC, from `PollObject`'s alarm. Press "Reset demo" in the presenter view to reset it at once.
 ## Styles
 
 The web client uses [Tailwind CSS](https://tailwindcss.com/) v4 through the built-in support in the Dioxus CLI.
