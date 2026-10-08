@@ -92,6 +92,9 @@ pub trait Log {
     fn range(&self, after: u64) -> Result<Vec<(u64, Vec<u8>)>, Self::Error>;
 
     /// Removes events that fall outside the retention policy.
+    ///
+    /// Age-based trimming removes every event up to and including the newest one older
+    /// than the age limit, so a clock that went backwards cannot leave a hole.
     fn trim(&mut self, policy: &Retention, now_ms: u64) -> Result<(), Self::Error>;
 }
 
@@ -153,6 +156,10 @@ pub enum ServerError<E> {
 /// Builds every frame a new connection receives, in order: `Hello`, then the replay,
 /// the latest event, or `Reset`.
 ///
+/// A replay is sent only when the retained events after the cursor run without a gap up to
+/// the head. Otherwise the client gets `Reset`, and the refetch that follows is always
+/// correct.
+///
 /// The caller must send all of them without yielding to other work, so that no publish
 /// lands between the replay and live events.
 pub fn handshake<L: Log + ?Sized>(
@@ -166,11 +173,17 @@ pub fn handshake<L: Log + ?Sized>(
         mode,
         head,
     })?];
+    let reset = codec::encode_frame::<()>(&ServerFrame::Reset { head })?;
     match on_connect(mode, since, log).map_err(ServerError::Log)? {
         OnConnect::LiveOnly => {}
         OnConnect::Replay { after } => {
-            for (seq, body) in log.range(after).map_err(ServerError::Log)? {
-                frames.push(codec::event_frame(seq, &body)?);
+            let rows = log.range(after).map_err(ServerError::Log)?;
+            if is_replayable(&rows, after, head.seq) {
+                for (seq, body) in rows {
+                    frames.push(codec::event_frame(seq, &body)?);
+                }
+            } else {
+                frames.push(reset);
             }
         }
         OnConnect::SendLatest => {
@@ -179,11 +192,18 @@ pub fn handshake<L: Log + ?Sized>(
                 frames.push(codec::event_frame(*seq, body)?);
             }
         }
-        OnConnect::Reset => {
-            frames.push(codec::encode_frame::<()>(&ServerFrame::Reset { head })?);
-        }
+        OnConnect::Reset => frames.push(reset),
     }
     Ok(frames)
+}
+
+/// Reports whether `rows` are exactly the events `after + 1 ..= head`.
+fn is_replayable(rows: &[(u64, Vec<u8>)], after: u64, head: u64) -> bool {
+    rows.len() as u64 == head - after
+        && rows
+            .iter()
+            .zip(after + 1..)
+            .all(|((seq, _), expected)| *seq == expected)
 }
 
 /// Appends an encoded event, trims the log, and returns the new head and the `Event` frame
@@ -268,13 +288,20 @@ impl Log for MemLog {
 
     fn trim(&mut self, policy: &Retention, now_ms: u64) -> Result<(), Infallible> {
         let count_cutoff = policy.count_cutoff(self.head).unwrap_or(0);
-        let age_cutoff = policy.age_cutoff(now_ms);
-        while let Some((seq, ts, _)) = self.rows.front() {
-            let too_many = *seq <= count_cutoff;
-            let too_old = age_cutoff.is_some_and(|cutoff| *ts < cutoff);
-            if !(too_many || too_old) {
-                break;
-            }
+        // Everything up to the newest expired event goes, the same rule as the SQLite log,
+        // so the log has no gap even if the clock went backwards between two appends.
+        let age_cutoff = policy
+            .age_cutoff(now_ms)
+            .and_then(|cutoff| {
+                self.rows
+                    .iter()
+                    .filter(|(_, ts, _)| *ts < cutoff)
+                    .map(|(seq, _, _)| *seq)
+                    .max()
+            })
+            .unwrap_or(0);
+        let cutoff = count_cutoff.max(age_cutoff);
+        while self.rows.front().is_some_and(|(seq, _, _)| *seq <= cutoff) {
             self.rows.pop_front();
         }
         Ok(())
@@ -416,6 +443,56 @@ mod tests {
         let frames = handshake(Mode::Latest, None, &log).unwrap();
         assert_eq!(frames[1], r#"{"t":"event","seq":3,"event":3}"#);
         assert_eq!(handshake(Mode::Log, None, &log).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn trim_by_age_keeps_the_log_contiguous_when_the_clock_goes_back() {
+        let mut log = MemLog::new(1);
+        for ts in [1000, 5000, 2000, 6000] {
+            log.append(b"0", ts).unwrap();
+        }
+        let policy = Retention {
+            max_events: 100,
+            max_age: Some(Duration::from_millis(1000)),
+        };
+        log.trim(&policy, 4000).unwrap();
+        // Event 3 expired, so event 2 goes too, though its timestamp is newer.
+        assert_eq!(log.oldest(), Ok(Some(4)));
+        assert_eq!(log.len(), 1);
+    }
+
+    /// A log that loses one event, as a broken trim would.
+    struct HoleyLog(MemLog, u64);
+
+    impl Log for HoleyLog {
+        type Error = Infallible;
+        fn head(&self) -> Result<Cursor, Infallible> {
+            self.0.head()
+        }
+        fn oldest(&self) -> Result<Option<u64>, Infallible> {
+            self.0.oldest()
+        }
+        fn append(&mut self, body: &[u8], now_ms: u64) -> Result<u64, Infallible> {
+            self.0.append(body, now_ms)
+        }
+        fn range(&self, after: u64) -> Result<Vec<(u64, Vec<u8>)>, Infallible> {
+            let mut rows = self.0.range(after)?;
+            rows.retain(|(seq, _)| *seq != self.1);
+            Ok(rows)
+        }
+        fn trim(&mut self, policy: &Retention, now_ms: u64) -> Result<(), Infallible> {
+            self.0.trim(policy, now_ms)
+        }
+    }
+
+    #[test]
+    fn handshake_resets_instead_of_replaying_a_gap() {
+        let log = HoleyLog(log_with(2, 5), 3);
+        let frames = handshake(Mode::Log, c(2, 1), &log).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1], r#"{"t":"reset","head":"2.5"}"#);
+        // A replay that skips the missing event is still sent.
+        assert_eq!(handshake(Mode::Log, c(2, 3), &log).unwrap().len(), 3);
     }
 
     #[test]
