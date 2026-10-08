@@ -7,6 +7,7 @@ The smallest partyline app: follow an order's status and notes live. It is the s
 | `shared/` | The `Orders` channel and the event types |
 | `worker/` | The Worker and the `OrderChannel` Durable Object, with its wrangler configuration |
 | `web/` | The Dioxus web client |
+| `tail/` | A native command-line client that prints the order's events and status changes |
 
 `OrderChannel` embeds the hub by hand. It owns the order state, so it applies each event and publishes it in one turn, and it reads a snapshot and its head in one turn.
 
@@ -25,6 +26,12 @@ npx wrangler dev
 ```
 
 Open <http://localhost:8787/> in two tabs, and change the status in one.
+
+To follow the same order from a terminal, run the native client next to it:
+
+```shell
+cargo run -p orders-tail -- http://localhost:8787 demo
+```
 
 The connect route forwards every upgrade. A real app authorizes the request there first: see [how to authenticate with Clerk](../../docs/how-to/authenticate-with-clerk.md).
 

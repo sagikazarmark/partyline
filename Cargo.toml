@@ -11,6 +11,7 @@ members = [
     "examples/orders/shared",
     "examples/orders/worker",
     "examples/orders/web",
+    "examples/orders/tail",
     "examples/poll/shared",
     "examples/poll/worker",
     "examples/poll/web",

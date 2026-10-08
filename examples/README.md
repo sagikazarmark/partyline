@@ -7,5 +7,6 @@
 | [`poll`](poll) | The live poll demo: a presenter view and a phone view, both channel modes, and both ways to build a Durable Object. It is deployed as the public demo |
 
 Each example has three crates: `shared` (the channels and event types), `worker` (the Worker and its Durable Objects), and `web` (the Dioxus client).
+`orders` has a fourth, [`tail`](orders/tail): a native command-line client on tokio that prints an order's events.
 
 The end-to-end tests run against `orders`, against `chat`, and against a separate test Worker in [`e2e/fixture`](../e2e/fixture), which holds the hooks that only tests need.
