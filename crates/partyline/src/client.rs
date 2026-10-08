@@ -106,6 +106,10 @@ pub enum Input {
     /// A timer requested earlier has fired.
     Timer(TimerId),
     /// The app became visible, or the network came back.
+    ///
+    /// It resets the attempt counter and connects at once while waiting. It replaces a
+    /// connect attempt in progress unless a wake started that attempt, and probes an open
+    /// socket with a ping. It does not restart a stopped client.
     Wake,
     /// Close the connection and stop.
     Stop,
@@ -157,7 +161,7 @@ pub enum Status {
         /// The delay before the next connect.
         retry_in: Duration,
         /// The number of the next connect attempt, counted from 1 since the last stable
-        /// connection.
+        /// connection or wake.
         attempt: u32,
         /// The close code of the connection that failed, or `None` when it failed without
         /// one: a network error, a timeout, or a protocol error.
@@ -169,7 +173,7 @@ pub enum Status {
         /// The delay before the next connect.
         retry_in: Duration,
         /// The number of the next connect attempt, counted from 1 since the last stable
-        /// connection.
+        /// connection or wake.
         attempt: u32,
     },
     /// Stopped for good. Only [`Input::Start`] restarts the client; a wake does not.
@@ -220,6 +224,8 @@ pub struct Client<C: Channel> {
     phase: Phase,
     status: Status,
     attempt: u32,
+    /// The connect attempt in progress was started by a wake.
+    woken: bool,
     armed: [bool; TimerId::ALL.len()],
     ping_outstanding: bool,
     _channel: PhantomData<fn() -> C>,
@@ -255,6 +261,7 @@ impl<C: Channel> Client<C> {
             phase: Phase::Idle,
             status: Status::Idle,
             attempt: 0,
+            woken: false,
             armed: [false; TimerId::ALL.len()],
             ping_outstanding: false,
             _channel: PhantomData,
@@ -282,7 +289,7 @@ impl<C: Channel> Client<C> {
             Input::Start => {
                 if matches!(self.phase, Phase::Idle | Phase::Stopped) {
                     self.attempt = 0;
-                    self.connect(out);
+                    self.connect(false, out);
                 }
             }
             Input::Opened => {
@@ -293,10 +300,22 @@ impl<C: Channel> Client<C> {
             Input::Frame(message) => self.on_frame(message, out),
             Input::Closed { code } => self.on_closed(code, out),
             Input::Timer(id) => self.on_timer(id, out),
+            // Wakes come from the OS or the user, never from the server, so resetting the
+            // attempt counter here cannot cause a tight loop.
             Input::Wake => match self.phase {
                 Phase::Waiting => {
-                    self.disarm(TimerId::Reconnect);
-                    self.connect(out);
+                    self.attempt = 0;
+                    self.connect(true, out);
+                }
+                Phase::Connecting | Phase::Handshaking => {
+                    self.attempt = 0;
+                    // An attempt started before the wake likely started while offline, and
+                    // is doomed. One started by a wake is left alone, because wake sources
+                    // often fire together.
+                    if !self.woken {
+                        out.push(Output::Close);
+                        self.connect(true, out);
+                    }
                 }
                 Phase::Open => {
                     out.push(Output::Send(Message::ping()));
@@ -411,7 +430,7 @@ impl<C: Channel> Client<C> {
         }
         self.armed[id.index()] = false;
         match (id, self.phase) {
-            (TimerId::Reconnect, Phase::Waiting) => self.connect(out),
+            (TimerId::Reconnect, Phase::Waiting) => self.connect(false, out),
             (TimerId::ConnectTimeout, Phase::Connecting | Phase::Handshaking) => {
                 out.push(Output::Close);
                 self.backoff(None, out);
@@ -441,9 +460,10 @@ impl<C: Channel> Client<C> {
         )
     }
 
-    fn connect(&mut self, out: &mut Vec<Output<C::Event>>) {
+    fn connect(&mut self, woken: bool, out: &mut Vec<Output<C::Event>>) {
         self.disarm_all();
         self.phase = Phase::Connecting;
+        self.woken = woken;
         self.ping_outstanding = false;
         out.push(Output::Connect {
             cursor: self.cursor,
@@ -1073,5 +1093,89 @@ mod tests {
             c.status(),
             Status::Unauthorized { attempt: 3, .. }
         ));
+    }
+
+    /// Fails `n` connect attempts in a row with the slowest jitter.
+    fn fail_attempts(c: &mut Client<LogChan>, n: usize) {
+        for _ in 0..n {
+            step(c, Input::Closed { code: Some(1006) });
+            step(c, Input::Timer(TimerId::Reconnect));
+        }
+    }
+
+    #[test]
+    fn wake_while_waiting_resets_the_attempt_counter() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        fail_attempts(&mut c, 8);
+        let out = step(&mut c, Input::Closed { code: Some(1006) });
+        assert_eq!(delays(&out)[0].1.as_millis(), 29999, "at the cap");
+        let out = step(&mut c, Input::Wake);
+        assert!(matches!(out[0], Output::Connect { .. }));
+        let out = step(&mut c, Input::Closed { code: Some(1006) });
+        assert_eq!(delays(&out)[0].1.as_millis(), 499, "back at the base");
+        assert!(matches!(c.status(), Status::Waiting { attempt: 1, .. }));
+    }
+
+    #[test]
+    fn wake_replaces_a_connect_attempt_not_started_by_a_wake() {
+        for opened in [false, true] {
+            let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+            step(&mut c, Input::Start);
+            fail_attempts(&mut c, 8);
+            if opened {
+                step(&mut c, Input::Opened);
+            }
+            let out = step(&mut c, Input::Wake);
+            assert_eq!(
+                out,
+                vec![
+                    Output::Close,
+                    Output::Connect { cursor: None },
+                    Output::SetTimer {
+                        id: TimerId::ConnectTimeout,
+                        after: Duration::from_secs(10)
+                    },
+                ],
+                "opened: {opened}"
+            );
+            let out = step(&mut c, Input::Closed { code: Some(1006) });
+            assert_eq!(delays(&out)[0].1.as_millis(), 499, "the counter reset");
+        }
+    }
+
+    #[test]
+    fn wake_leaves_a_connect_attempt_started_by_a_wake_alone() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        step(&mut c, Input::Closed { code: None });
+        assert!(matches!(
+            step(&mut c, Input::Wake)[0],
+            Output::Connect { .. }
+        ));
+        // `visibilitychange` and `online` often fire together.
+        assert!(step(&mut c, Input::Wake).is_empty());
+        step(&mut c, Input::Opened);
+        assert!(step(&mut c, Input::Wake).is_empty());
+        step(&mut c, hello("log", "1.1"));
+        assert_eq!(c.status(), Status::Open);
+    }
+
+    #[test]
+    fn a_wake_reset_still_needs_a_stable_connection_for_server_closes() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        step(&mut c, Input::Closed { code: None });
+        step(&mut c, Input::Wake);
+        // The server accepts and closes at once, again and again: the backoff still grows.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            step(&mut c, Input::Opened);
+            step(&mut c, hello("log", "1.0"));
+            let out = step(&mut c, Input::Closed { code: Some(1011) });
+            seen.push(delays(&out)[0].1.as_millis());
+            step(&mut c, Input::Timer(TimerId::Reconnect));
+        }
+        assert_eq!(seen, vec![499, 999, 1999]);
     }
 }

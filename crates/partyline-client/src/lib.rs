@@ -272,7 +272,9 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Connects now if waiting to reconnect, or probes an open socket with a ping.
+    /// Connects now if waiting to reconnect, restarts a connect attempt that may have
+    /// started while offline, or probes an open socket with a ping. It also resets the
+    /// reconnect backoff.
     pub fn wake(&self) {
         let _ = self.commands.unbounded_send(Command::Wake);
     }

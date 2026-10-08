@@ -56,6 +56,10 @@ handle.stop(); // close with 1000 and end the driver
 | `Incompatible { seq }` | The server sent an event this build cannot decode. The app is outdated: ask the user to reload. The client does not reconnect, because the server would replay the same event |
 | `InvalidUrl` | The base URL could not be resolved |
 
+## Wake
+
+`handle.wake()` resets the reconnect backoff and connects at once while waiting. A connect attempt in progress that did not start with a wake is replaced, because it likely started while offline. On an open socket it sends a ping with a short timeout, to find a dead socket quickly.
+
 ## Authentication
 
 Set a `TokenProvider`. The driver calls it before every connect and puts the result in the `token` query parameter, because browsers cannot set headers on a WebSocket.
