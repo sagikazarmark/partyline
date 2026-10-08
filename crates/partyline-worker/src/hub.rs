@@ -332,7 +332,9 @@ impl<C: Channel> Hub<C> {
 
     /// Wipes the log, starts a new epoch, and closes every socket with 1012.
     ///
-    /// Clients reconnect. A Log client receives `Reset`; a Latest client adopts the new epoch.
+    /// Clients reconnect. A Log client receives `Reset`. A Latest client adopts the new
+    /// epoch, but has nothing to show until the next publish, so publish a fresh value
+    /// right after a reset.
     pub fn reset(&self) -> worker::Result<Cursor> {
         let head = self.log().reset()?;
         for ws in self.state.get_websockets() {
