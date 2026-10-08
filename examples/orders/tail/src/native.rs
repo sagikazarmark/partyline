@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use futures::StreamExt;
 use orders_shared::Orders;
 use partyline::Cursor;
-use partyline_client::{BaseUrl, ClientEvent, ConnectOptions};
+use partyline_client::{BaseUrl, ClientEvent, ConnectOptions, Status, StopReason};
 
 const USAGE: &str = "usage: orders-tail <base-url> <order-id> [cursor]";
 
@@ -52,10 +52,27 @@ pub async fn main() -> ExitCode {
         }
     }
 
-    let _ = driver.await;
+    let driver = driver.await;
     match handle.cursor() {
         Some(cursor) => println!("cursor {cursor}"),
         None => println!("cursor none"),
     }
-    ExitCode::SUCCESS
+    // Ctrl-C stops the client with `StopReason::App`. Any other stop is an error: a terminal
+    // close code, an event this build cannot decode, or an invalid base URL.
+    match (driver, handle.status()) {
+        (Err(e), _) => {
+            eprintln!("the driver failed: {e}");
+            ExitCode::FAILURE
+        }
+        (
+            Ok(()),
+            Status::Stopped {
+                reason: StopReason::App,
+            },
+        ) => ExitCode::SUCCESS,
+        (Ok(()), status) => {
+            eprintln!("stopped: {status:?}");
+            ExitCode::FAILURE
+        }
+    }
 }

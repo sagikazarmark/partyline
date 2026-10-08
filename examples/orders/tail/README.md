@@ -28,5 +28,6 @@ event  4503599627370495.2 NoteAdded { note: "No onions" }
 
 Stop the Worker and start it again to see the reconnect: `Waiting { .. }`, then `Open`.
 Press Ctrl-C to close the socket with 1000. The client prints its last cursor; pass it as the third argument to resume from there.
+It exits with status 0 after Ctrl-C, and 1 when the client stops for any other reason, such as a terminal close code or an event it cannot decode.
 
 Status lines are printed with `{:?}`, so they show every field of `Status`, such as the attempt number and the last close code.
