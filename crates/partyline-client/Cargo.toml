@@ -10,13 +10,16 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-## Listens for `visibilitychange` and `online` in the browser and wakes the client.
+## Listens for `visibilitychange`, `online`, `pageshow` (back-forward cache restore), `resume`
+## (after a freeze), and network changes in the browser, and wakes the client.
 web-wake = [
     "web-sys/Window",
     "web-sys/Document",
     "web-sys/VisibilityState",
     "web-sys/EventTarget",
     "web-sys/Event",
+    "web-sys/Navigator",
+    "web-sys/PageTransitionEvent",
 ]
 
 [dependencies]

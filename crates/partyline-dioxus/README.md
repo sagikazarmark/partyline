@@ -43,7 +43,7 @@ On web the base URL defaults to the page origin, so most apps configure nothing.
 - **Start.** The driver starts from an effect. Effects do not run during server-side rendering.
 - **Stop.** On unmount the hook closes the socket with 1000.
 - **Change.** When the channel ID changes, the hook stops the old driver and starts a new one.
-- **Wake.** On wasm, the client listens for `visibilitychange` and `online`.
+- **Wake.** On wasm, the client wakes on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume`, and network changes.
 
 A client that receives an event it cannot decode stops with `Stopped { reason: StopReason::Incompatible { .. } }` instead of reconnecting. The app is older than the server: ask the user to reload.
 

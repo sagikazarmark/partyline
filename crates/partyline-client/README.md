@@ -70,7 +70,7 @@ See [how to authenticate with Clerk](https://github.com/sagikazarmark/partyline/
 
 | Feature | Effect |
 | --- | --- |
-| `web-wake` | Wakes the client on `visibilitychange` and `online` in the browser |
+| `web-wake` | Wakes the client in the browser on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume` after a freeze, and `navigator.connection` changes where supported |
 
 Native targets have no wake source. The heartbeat finds a dead socket within 35 s with the default settings.
 
