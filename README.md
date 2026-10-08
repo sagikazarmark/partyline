@@ -1,6 +1,6 @@
 # partyline
 
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/partyline/ci.yaml?style=flat-square)](https://github.com/sagikazarmark/partyline/actions/workflows/ci.yaml)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/partyline/dagger.yaml?style=flat-square)](https://github.com/sagikazarmark/partyline/actions/workflows/dagger.yaml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/sagikazarmark/partyline/badge?style=flat-square)](https://securityscorecards.dev/viewer/?uri=github.com/sagikazarmark/partyline)
 [![crates.io](https://img.shields.io/crates/v/partyline?style=flat-square)](https://crates.io/crates/partyline)
 [![docs.rs](https://img.shields.io/docsrs/partyline?style=flat-square)](https://docs.rs/partyline)
