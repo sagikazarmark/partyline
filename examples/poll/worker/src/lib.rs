@@ -96,6 +96,8 @@ impl PollObject {
     }
 
     /// Zeroes the tally, wipes the activity log with a new epoch, and announces the reset.
+    ///
+    /// Each step is safe to repeat, so a reset that failed partway can run again.
     async fn reset(&self, poll: &str) -> Result<()> {
         self.sql().exec("DELETE FROM poll_votes", None)?;
         self.hub.publish(&Tally::default()).await?;
@@ -195,10 +197,12 @@ impl DurableObject for PollObject {
         // The alarm is shared, so it can fire before the daily reset is due.
         if let Some(at) = self.reset_at()? {
             if Date::now().as_millis() >= at {
-                self.set_reset_at(None)?;
+                // Clear the deadline only after the reset succeeds. If a step fails, the
+                // runtime retries the alarm, and every step is safe to run again.
                 if let Some(poll) = self.poll()? {
                     self.reset(&poll).await?;
                 }
+                self.set_reset_at(None)?;
             } else {
                 self.hub.schedule_alarm(at).await?;
             }
