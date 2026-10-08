@@ -147,6 +147,8 @@ dagger check examples                                 # layers 3 (browser) and 4
 
 The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require.
 
+The four crates share one version and are released together: `cargo release` tags `v{version}`, and the [release workflow](.github/workflows/release.yml) publishes from the tag.
+
 ## License
 
 Licensed under either of
