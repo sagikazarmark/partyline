@@ -14,7 +14,7 @@ Instead of a throwaway Worker, the questions were answered against `worker` 0.8.
 | ... including through an axum router on Workers | Yes, with `Connect::forward_http` (feature `http`). The WebSocket survives the `http` conversions in the response extensions | The e2e fixture routes through axum: `e2e/tests/fixture.rs` |
 | Frames sent on the server socket before the 101 response arrive first | Yes | Every end-to-end test reads `Hello` and the replay first |
 | `#[durable_object]` expands correctly when a `macro_rules!` macro in another crate emits it | Yes, once `wasm_bindgen` is in scope (see below) | The demo's `ActivityChannel` and the e2e fixture's `TickChannel` are built with `channel_object!` and run under `wrangler dev` |
-| Publish the `0.0.0` placeholders | **Open.** Needs the crate owner's crates.io token. Trusted publishing from CI works only for crates that already exist on crates.io | Publish each crate once by hand with a token, then add the trusted publisher: workflow `release.yml`, environment `release` |
+| Publish the `0.0.0` placeholders | **Open.** Needs the crate owner's crates.io token | Publish with `cargo release` from the owner's machine |
 | A phone receives a broadcast after the Durable Object has hibernated | **Open.** Hibernation cannot be forced locally | The manual check in [Testing](../testing.md#manual-hibernation-check) |
 
 ## Awkward `worker` APIs and how partyline handles them

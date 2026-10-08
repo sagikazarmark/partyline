@@ -150,7 +150,7 @@ dagger call examples orders service up --ports 8787:8787   # run an example on h
 
 The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI builds on it.
 
-The four crates share one version and are released together: `cargo release` tags `v{version}`, and the [release workflow](.github/workflows/release.yml) publishes from the tag.
+The four crates share one version and are released together with `cargo release`, under one `v{version}` tag.
 
 ## License
 

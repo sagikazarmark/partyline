@@ -61,8 +61,7 @@ worker = "0.8.7"
 proptest = "1.11"
 wasm-bindgen-test = "0.3"
 
-# cargo-release: bumps the shared version, commits, tags, and pushes.
-# The release workflow publishes to crates.io when the tag arrives.
+# cargo-release: bumps the shared version, commits, tags, publishes to crates.io, and pushes.
 [workspace.metadata.release]
 allow-branch = ["main"]
 sign-commit = true
@@ -71,7 +70,6 @@ shared-version = true
 consolidate-commits = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
-publish = false
 
 [workspace.lints.rust]
 missing_docs = "warn"
