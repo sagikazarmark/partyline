@@ -3,6 +3,8 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use partyline::frame::{ConnectParams, PING, PONG, decode_segment};
 use partyline::server::{self, Limits, Log, Retention, ServerError};
 use partyline::{Channel, Cursor, Mode, close, codec};
@@ -189,7 +191,13 @@ impl<C: Channel> Hub<C> {
         let url = req.url()?;
         match (req.method(), url.path()) {
             (Method::Post, "/publish") => {
-                let body = req.bytes().await?;
+                let max = self.config.limits().max_event_bytes;
+                let Some(body) = read_body(&mut req, max).await? else {
+                    return Response::error(
+                        format!("event is more than the limit of {max} bytes"),
+                        413,
+                    );
+                };
                 match self.publish_raw(&body, on_publish).await {
                     Ok(cursor) => Response::ok(cursor.to_string()),
                     Err(PublishError::Invalid(e)) => Response::error(e, 400),
@@ -446,6 +454,31 @@ impl PublishError {
             Self::Worker(e) => e,
         }
     }
+}
+
+/// Reads a request body of at most `max` bytes, or returns `None` as soon as it is longer,
+/// so an oversized publish is never buffered whole.
+async fn read_body(req: &mut Request, max: usize) -> worker::Result<Option<Vec<u8>>> {
+    let declared = req
+        .headers()
+        .get("content-length")?
+        .and_then(|len| len.parse::<usize>().ok());
+    if declared.is_some_and(|len| len > max) {
+        return Ok(None);
+    }
+    if req.inner().body().is_none() {
+        return Ok(Some(Vec::new()));
+    }
+    let mut body = Vec::new();
+    let mut stream = req.stream()?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > max {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
 }
 
 /// Checks a socket tag against the runtime's rules: not empty, at most 256 characters.

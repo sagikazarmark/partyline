@@ -2168,6 +2168,7 @@ name = "partyline-worker"
 version = "0.2.0"
 dependencies = [
  "bytes",
+ "futures",
  "http",
  "http-body",
  "partyline",
