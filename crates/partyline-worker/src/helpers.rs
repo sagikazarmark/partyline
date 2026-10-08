@@ -216,13 +216,20 @@ impl<C: Channel> Publisher<C> {
 }
 
 /// Removes the `token` query parameter, keeping the others exactly as encoded.
+///
+/// Keys are compared decoded, the way `Url::query_pairs` reads them, so an encoded key such
+/// as `to%6Ben` is removed too.
 fn strip_token(url: &mut worker::Url) {
     let Some(query) = url.query() else {
         return;
     };
     let kept: Vec<&str> = query
         .split('&')
-        .filter(|pair| pair.split_once('=').map_or(*pair, |(key, _)| key) != "token")
+        .filter(|pair| {
+            worker::url::form_urlencoded::parse(pair.as_bytes())
+                .next()
+                .is_none_or(|(key, _)| key != "token")
+        })
         .collect();
     let kept = kept.join("&");
     url.set_query((!kept.is_empty()).then_some(kept.as_str()));
@@ -273,6 +280,11 @@ mod tests {
             "https://a/partyline/c/1"
         );
         assert_eq!(strip("https://a/p?v=1&x=a%20b"), "https://a/p?v=1&x=a%20b");
+        assert_eq!(
+            strip("https://a/p?v=1&to%6Ben=secret&t%6Fken=x&token"),
+            "https://a/p?v=1",
+            "encoded and empty keys are removed too"
+        );
         assert_eq!(strip("https://a/p"), "https://a/p");
     }
 }
