@@ -20,6 +20,9 @@ pub(crate) const TAGS_HEADER: &str = "x-partyline-tags";
 /// The most tags a socket can carry. The runtime allows 10.
 const MAX_TAGS: usize = 10;
 
+/// The longest close reason, in bytes. The WebSocket protocol allows 123.
+const MAX_REASON_BYTES: usize = 123;
+
 /// Hub settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HubConfig {
@@ -182,7 +185,7 @@ impl<C: Channel> Hub<C> {
             Err(e) => {
                 pair.server.accept()?;
                 pair.server
-                    .close(Some(e.close_code()), Some(e.to_string()))?;
+                    .close(Some(e.close_code()), Some(close_reason(&e.to_string())))?;
                 return Response::from_websocket(pair.client);
             }
         };
@@ -296,7 +299,7 @@ impl<C: Channel> Hub<C> {
             Ok(code @ 1000..=4999) if !matches!(code, 1005 | 1006 | 1015) => code,
             _ => return Ok(()),
         };
-        let _ = ws.close(Some(code), Some(reason));
+        let _ = ws.close(Some(code), Some(close_reason(&reason)));
         Ok(())
     }
 
@@ -345,6 +348,19 @@ impl PublishError {
     }
 }
 
+/// Shortens a close reason to the 123 bytes the protocol allows, at a character boundary.
+/// A longer reason makes `close` throw.
+pub(crate) fn close_reason(reason: &str) -> &str {
+    if reason.len() <= MAX_REASON_BYTES {
+        return reason;
+    }
+    let mut end = MAX_REASON_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
 pub(crate) fn is_upgrade(req: &Request) -> bool {
     req.headers()
         .get("upgrade")
@@ -355,4 +371,19 @@ pub(crate) fn is_upgrade(req: &Request) -> bool {
 
 fn now_ms() -> u64 {
     Date::now().as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_reasons_are_cut_at_a_char_boundary() {
+        assert_eq!(close_reason("short"), "short");
+        let long = "é".repeat(100);
+        let cut = close_reason(&long);
+        assert_eq!(cut.len(), 122);
+        assert!(cut.chars().all(|c| c == 'é'));
+        assert_eq!(close_reason(&"a".repeat(200)).len(), 123);
+    }
 }

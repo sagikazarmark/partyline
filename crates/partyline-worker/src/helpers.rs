@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use partyline::{Channel, Cursor, codec};
 use worker::{Env, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
 
-use crate::hub::{TAGS_HEADER, is_upgrade};
+use crate::hub::{TAGS_HEADER, close_reason, is_upgrade};
 
 /// The base URL of internal requests to the hub. The host is never resolved.
 const INTERNAL: &str = "https://partyline.internal";
@@ -200,6 +200,6 @@ fn parse_cursor(text: &str) -> worker::Result<Cursor> {
 pub fn reject(code: u16, reason: &str) -> worker::Result<Response> {
     let pair = worker::WebSocketPair::new()?;
     pair.server.accept()?;
-    pair.server.close(Some(code), Some(reason))?;
+    pair.server.close(Some(code), Some(close_reason(reason)))?;
     Response::from_websocket(pair.client)
 }
