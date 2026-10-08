@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use partyline::frame::encode_segment;
+use partyline::frame::{InvalidId, encode_segment, match_connect_path};
 use partyline::{Channel, Cursor, codec};
 use worker::{Env, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
 
@@ -46,6 +46,24 @@ impl<C: Channel> Connect<C> {
             tags: Vec::new(),
             _channel: PhantomData,
         }
+    }
+
+    /// Matches a request path against this channel's connect path,
+    /// `/partyline/{C::NAME}/{id}`, and targets the decoded ID.
+    ///
+    /// Returns `None` when the path is another route, and `Some(Err(_))` when the ID is not
+    /// valid percent-encoding. Use it in a Worker without a router; with a router, decode
+    /// the route parameter with [`crate::decode_segment`].
+    ///
+    /// ```ignore
+    /// match Connect::<Orders>::from_path(&req.path()) {
+    ///     Some(Ok(connect)) => connect.forward(&env, "ORDER_CHANNEL", req).await,
+    ///     Some(Err(_)) => reject(close::BAD_REQUEST, "invalid id"),
+    ///     None => other_routes(req, env).await,
+    /// }
+    /// ```
+    pub fn from_path(path: &str) -> Option<Result<Self, InvalidId>> {
+        match_connect_path(C::NAME, path).map(|id| id.map(Self::new))
     }
 
     /// Adds a socket tag, such as the user ID. [`Publisher::close_tagged`] closes sockets by tag.
@@ -209,6 +227,7 @@ fn strip_token(url: &mut worker::Url) {
     let kept = kept.join("&");
     url.set_query((!kept.is_empty()).then_some(kept.as_str()));
 }
+
 fn parse_cursor(text: &str) -> worker::Result<Cursor> {
     text.trim()
         .parse()

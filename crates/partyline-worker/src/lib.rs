@@ -30,7 +30,7 @@ pub use helpers::{Connect, Publisher, reject};
 pub use hub::{Hub, HubConfig};
 pub use sql_log::SqlLog;
 
-pub use partyline::frame::decode_segment;
+pub use partyline::frame::{InvalidId, decode_segment};
 pub use partyline::{self, Channel, Cursor, Mode, close};
 
 /// Generates a Durable Object that holds only a [`Hub`], with every handler delegated to it.

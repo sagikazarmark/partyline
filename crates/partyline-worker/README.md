@@ -68,7 +68,7 @@ See `PollObject` in [`examples/poll`](https://github.com/sagikazarmark/partyline
 
 ## Use it from the Worker
 
-Route parameters usually arrive percent-encoded, because the client encodes the channel ID in the connect path. Decode the ID with `decode_segment` before you pass it to `Connect` or `Publisher`, so both name the same Durable Object. axum's `Path` extractor decodes for you.
+Route parameters usually arrive percent-encoded, because the client encodes the channel ID in the connect path. Decode the ID with `decode_segment` before you pass it to `Connect` or `Publisher`, so both name the same Durable Object. axum's `Path` extractor decodes for you, and `Connect::from_path` matches `/partyline/{channel}/{id}` and decodes the ID in one step.
 
 ```rust
 // Forward a client upgrade. Authorize first.

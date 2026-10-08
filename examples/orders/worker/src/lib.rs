@@ -93,14 +93,13 @@ fn route_id<D>(ctx: &RouteContext<D>) -> Option<String> {
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     Router::new()
         .get_async("/partyline/orders/:id", |req, ctx| async move {
-            let Some(id) = route_id(&ctx) else {
+            // `from_path` matches the connect path and decodes the ID.
+            let Some(Ok(connect)) = Connect::<Orders>::from_path(&req.path()) else {
                 return reject(close::BAD_REQUEST, "invalid id");
             };
             // A real app authorizes the request here, and tags the socket with the user ID.
             // See docs/how-to/authenticate-with-clerk.md.
-            Connect::<Orders>::new(id)
-                .forward(&ctx.env, BINDING, req)
-                .await
+            connect.forward(&ctx.env, BINDING, req).await
         })
         .get_async("/api/orders/:id", |_req, ctx| async move {
             let Some(id) = route_id(&ctx) else {

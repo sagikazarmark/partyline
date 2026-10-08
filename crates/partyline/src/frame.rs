@@ -266,6 +266,26 @@ pub fn connect_path(channel: &str, id: &str) -> String {
     )
 }
 
+/// Matches a request path against a channel's connect path, `/partyline/{channel}/{id}`,
+/// and decodes the ID.
+///
+/// Returns `None` when the path is not this channel's connect path, so the router can try
+/// other routes, and `Some(Err(InvalidId))` when the ID segment is not valid
+/// percent-encoded UTF-8.
+pub fn match_connect_path(channel: &str, path: &str) -> Option<Result<String, InvalidId>> {
+    let rest = path.strip_prefix(PATH_PREFIX)?.strip_prefix('/')?;
+    let (name, id) = rest.split_once('/')?;
+    if decode_segment(name)? != channel || id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(decode_segment(id).ok_or(InvalidId))
+}
+
+/// The error returned when a channel ID in a path is not valid percent-encoded UTF-8.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid channel ID encoding")]
+pub struct InvalidId;
+
 /// Percent-encodes a path segment or query value. Everything except the unreserved URL
 /// characters `A-Z a-z 0-9 - _ . ~` is encoded, including `/`.
 pub fn encode_segment(s: &str) -> String {
@@ -430,5 +450,28 @@ mod tests {
             connect_path("orders", "a/b c"),
             "/partyline/orders/a%2Fb%20c"
         );
+    }
+
+    #[test]
+    fn connect_paths_match_and_decode() {
+        let path = connect_path("orders", "a/b c");
+        assert_eq!(
+            match_connect_path("orders", &path),
+            Some(Ok("a/b c".to_owned()))
+        );
+        assert_eq!(
+            match_connect_path("orders", "/partyline/orders/%zz"),
+            Some(Err(InvalidId))
+        );
+        for other in [
+            "/partyline/chat/1",
+            "/partyline/orders",
+            "/partyline/orders/",
+            "/partyline/orders/1/extra",
+            "/partylineorders/1",
+            "/api/orders/1",
+        ] {
+            assert_eq!(match_connect_path("orders", other), None, "{other}");
+        }
     }
 }
