@@ -12,7 +12,7 @@ The ID of one instance of a channel, such as an order ID. Each channel ID is one
 
 ## Cursor
 
-The position of a client in a channel: `(epoch, seq)`, written `{epoch}.{seq}`. A client reconnects with its cursor and receives every event after it.
+The position of a client in a channel: `(epoch, seq)`, written `{epoch}.{seq}`. A client reconnects with its cursor. On a Log channel it receives every event after the cursor, or `Reset` when those events are no longer retained or the replay is over its budget. On a Latest channel it receives the current value if the cursor is behind.
 
 ## Durable Object
 

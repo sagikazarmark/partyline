@@ -274,6 +274,8 @@ That is the client's reconnect with backoff. It reconnects with its cursor, so a
 
 ## 7. Deploy
 
+The shout route accepts publishes from anyone, so a public deployment can be flooded. Before you deploy, add a rate limit to it, as in [Deploy to Cloudflare](../how-to/deploy-to-cloudflare.md), or keep the deployment private.
+
 ```shell
 cd worker
 npx wrangler login

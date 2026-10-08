@@ -1,7 +1,7 @@
 # partyline documentation
 
 partyline pushes sequenced, resumable events from a Cloudflare Durable Object to Dioxus clients over WebSockets.
-A client that loses its connection reconnects with its last cursor and receives exactly the events it missed.
+A client that loses its connection reconnects with its last cursor. On a Log channel it receives exactly the events it missed, or a `Reset` when they are no longer retained or the replay is over its budget, and then refetches. On a Latest channel it receives the current value.
 
 The documentation has four parts. Start with the tutorial if partyline is new to you.
 

@@ -1,7 +1,7 @@
 # How partyline works
 
 partyline sends events one way: from a Cloudflare Durable Object to clients, over WebSockets.
-Each event gets a sequence number. A client that loses its connection reconnects with the last number it saw, and receives exactly the events it missed.
+Each event gets a sequence number. A client that loses its connection reconnects with the last number it saw. On a Log channel it receives exactly the events it missed, or `Reset` when they can no longer be replayed. On a Latest channel it receives the current value, because only the latest one matters.
 
 ## The parts
 
