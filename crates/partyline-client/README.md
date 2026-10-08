@@ -53,6 +53,7 @@ handle.stop(); // close with 1000 and end the driver
 | --- | --- |
 | `App` | The app called `stop`, or dropped every handle |
 | `Closed(code)` | The server closed with a terminal code, such as 4403 |
+| `Incompatible { seq }` | The server sent an event this build cannot decode. The app is outdated: ask the user to reload. The client does not reconnect, because the server would replay the same event |
 | `InvalidUrl` | The base URL could not be resolved |
 
 ## Authentication

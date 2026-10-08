@@ -52,6 +52,7 @@ The implementation follows the plan, with these changes. Each one came from a pr
 | Event size | A target of 16 KB, not enforced | `HubConfig::max_event_bytes`, 64 KiB by default. A larger publish fails with HTTP 413 | A large event is a bug in the app. Failing the publish shows it at once |
 | Handler delegation | Write each handler, or generate the whole object | Also `hub_handlers!` and `hub_websocket_handlers!` inside a hand-written `impl DurableObject`, and `Hub::fetch_with` to apply each published event in the object | Objects with their own state repeated the same four handlers and matched the hub's internal `/publish` route by hand |
 | Alarm | The hub owns the alarm | `Hub::schedule_alarm` keeps the earlier of two alarm times, so an object and its hub share the one alarm | A Durable Object has one alarm. The demo needs a daily reset next to the hub's trimming |
+| Stopped status | `Stopped { code }` | `Stopped { reason: StopReason }`, with `Incompatible` for an event the client cannot decode | An undecodable event means a newer Worker. Reconnecting cannot fix it, so the client stops and the app prompts a reload |
 
 ## Tooling notes
 

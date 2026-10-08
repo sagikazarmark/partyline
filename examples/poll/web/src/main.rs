@@ -187,6 +187,13 @@ fn StatusBadge(state: PollState) -> Element {
             "bg-amber-500",
             format!("Reconnecting in {:.1} s", retry_in.as_secs_f32()),
         ),
+        Status::Stopped {
+            reason: StopReason::Incompatible { .. },
+        } => (
+            "bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
+            "bg-rose-500",
+            "New version: reload".to_owned(),
+        ),
         Status::Stopped { .. } => (
             "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
             "bg-slate-400",

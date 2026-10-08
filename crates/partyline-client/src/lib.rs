@@ -315,8 +315,9 @@ impl<E> Stream for Events<E> {
 /// Connects to channel `C` with the default transport for the target.
 ///
 /// Returns a control handle, the event stream, and the driver future. Nothing happens until
-/// the driver runs. The driver ends after [`Handle::stop`], after a terminal close code,
-/// or when every handle is dropped.
+/// the driver runs. The driver ends with [`Status::Stopped`]: after [`Handle::stop`], after a
+/// terminal close code, after an event it cannot decode, or when every handle is dropped.
+/// Connect again to restart it.
 pub fn connect<C: Channel>(
     options: ConnectOptions,
 ) -> (Handle, Events<C::Event>, impl Future<Output = ()>) {

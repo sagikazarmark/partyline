@@ -45,6 +45,8 @@ On web the base URL defaults to the page origin, so most apps configure nothing.
 - **Change.** When the channel ID changes, the hook stops the old driver and starts a new one.
 - **Wake.** On wasm, the client listens for `visibilitychange` and `online`.
 
+A client that receives an event it cannot decode stops with `Stopped { reason: StopReason::Incompatible { .. } }` instead of reconnecting. The app is older than the server: ask the user to reload.
+
 Two components that subscribe to the same channel open two sockets in 0.1.
 
 ## License

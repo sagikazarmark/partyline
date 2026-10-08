@@ -188,9 +188,12 @@ impl TestServer {
     }
 
     fn publish(&self, n: u64) {
+        self.publish_body(&codec::encode_event(&n).unwrap());
+    }
+
+    fn publish_body(&self, body: &[u8]) {
         let mut log = self.log.lock().unwrap();
-        let body = codec::encode_event(&n).unwrap();
-        let (_, frame) = server::publish(&mut *log, &body, &Retention::LOG_DEFAULT, 0).unwrap();
+        let (_, frame) = server::publish(&mut *log, body, &Retention::LOG_DEFAULT, 0).unwrap();
         self.sockets
             .lock()
             .unwrap()
@@ -310,6 +313,27 @@ async fn driver_stops_on_a_terminal_close_code() {
 }
 
 #[tokio::test]
+async fn driver_stops_on_an_event_it_cannot_decode() {
+    let server = TestServer::start().await;
+    let (handle, mut events, driver) = partyline_client::connect::<Counter>(server.options());
+    let driver = tokio::spawn(driver);
+    wait_for(&mut events, |e| *e == ClientEvent::Status(Status::Open)).await;
+    server.publish(1);
+    server.publish_body(br#"{"type":"added_later"}"#);
+    let stopped = Status::Stopped {
+        reason: StopReason::Incompatible { seq: 2 },
+    };
+    wait_for(&mut events, |e| *e == ClientEvent::Status(stopped)).await;
+    tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the driver ends")
+        .unwrap();
+    assert_eq!(handle.status(), stopped);
+    assert_eq!(handle.cursor(), Some(Cursor::new(9, 1)));
+    assert_eq!(server.queries.lock().unwrap().len(), 1, "no reconnect");
+}
+
+#[tokio::test]
 async fn driver_stops_on_an_invalid_base_url() {
     let (handle, mut events, driver) = partyline_client::connect::<Counter>(ConnectOptions::new(
         BaseUrl::Explicit("ftp://example.com".into()),
@@ -324,6 +348,7 @@ async fn driver_stops_on_an_invalid_base_url() {
     assert_eq!(events.next().await, Some(ClientEvent::Status(stopped)));
     assert_eq!(handle.status(), stopped);
 }
+
 #[tokio::test]
 async fn driver_asks_the_token_provider_before_every_connect() {
     let server = TestServer::start().await;

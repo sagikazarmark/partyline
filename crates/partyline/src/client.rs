@@ -188,6 +188,13 @@ pub enum StopReason {
     /// The server closed the connection with a terminal close code, such as 4403. A `Hello`
     /// with an unsupported protocol version stops the client with 4426.
     Closed(u16),
+    /// The server sent an event this client cannot decode, so the app is older than the
+    /// server. Reload the app to get the new event type. Reconnecting would replay the
+    /// same event.
+    Incompatible {
+        /// The sequence number of the event.
+        seq: u64,
+    },
     /// The base URL could not be resolved. The driver reports this before it connects.
     InvalidUrl,
 }
@@ -326,7 +333,9 @@ impl<C: Channel> Client<C> {
             }
             return;
         }
-        let frame = match codec::decode_frame::<C::Event>(&text) {
+        // The envelope and the event payload are decoded apart, so a malformed frame (a
+        // protocol error) is told from an event this build does not know (an outdated app).
+        let frame = match codec::decode_envelope(&text) {
             Ok(frame) => frame,
             // A frame type from a later protocol version: skip it.
             Err(_) if codec::is_unknown_frame(&text) => return,
@@ -359,7 +368,7 @@ impl<C: Channel> Client<C> {
                 self.set_status(Status::Open, out);
             }
             (Phase::Open, ServerFrame::Event { seq, event }) => {
-                let Some(cursor) = self.cursor.as_mut() else {
+                let Some(cursor) = self.cursor else {
                     return self.protocol_error(out);
                 };
                 if seq <= cursor.seq {
@@ -369,7 +378,13 @@ impl<C: Channel> Client<C> {
                     // A missed event. Reconnect and let the server replay the gap.
                     return self.protocol_error(out);
                 }
-                cursor.seq = seq;
+                let Ok(event) = codec::decode_payload::<C::Event>(&event) else {
+                    // The server knows an event type this build does not. A reconnect would
+                    // replay the same event, so stop until the app restarts.
+                    out.push(Output::Close);
+                    return self.stop(StopReason::Incompatible { seq }, out);
+                };
+                self.cursor = Some(Cursor::new(cursor.epoch, seq));
                 out.push(Output::Event { seq, event });
             }
             (Phase::Open, ServerFrame::Reset { head }) => {
@@ -955,6 +970,78 @@ mod tests {
         assert!(step(&mut c, event(1, 1)).is_empty());
         assert!(step(&mut c, Input::Closed { code: None }).is_empty());
         assert!(step(&mut c, Input::Wake).is_empty());
+    }
+
+    /// An event of a variant this build does not know: `Ev` is a number.
+    fn new_variant(seq: u64) -> Input {
+        text(&format!(
+            r#"{{"t":"event","seq":{seq},"event":{{"type":"added_later"}}}}"#
+        ))
+    }
+
+    fn assert_incompatible<C: Channel<Event = Ev>>(
+        mode: &str,
+        since: Cursor,
+        head: &str,
+        seq: u64,
+    ) {
+        let mut c = client::<C>(Some(since));
+        open(&mut c, mode, head);
+        let out = step(&mut c, new_variant(seq));
+        assert_eq!(
+            out,
+            vec![
+                Output::Close,
+                Output::Status(Status::Stopped {
+                    reason: StopReason::Incompatible { seq }
+                })
+            ]
+        );
+        assert_eq!(c.cursor(), Some(since), "the event is not consumed");
+        assert!(
+            step(&mut c, Input::Wake).is_empty(),
+            "wake does not restart"
+        );
+        for id in TimerId::ALL {
+            assert!(step(&mut c, Input::Timer(id)).is_empty(), "{id:?}");
+        }
+        assert!(step(&mut c, Input::Closed { code: None }).is_empty());
+        // Only an app restart connects again, from the same cursor.
+        let out = step(&mut c, Input::Start);
+        assert_eq!(
+            out[0],
+            Output::Connect {
+                cursor: Some(since)
+            }
+        );
+    }
+
+    #[test]
+    fn an_undecodable_event_stops_instead_of_reconnecting() {
+        assert_incompatible::<LogChan>("log", Cursor::new(EPOCH, 3), "77.4", 4);
+    }
+
+    #[test]
+    fn an_undecodable_latest_value_stops_instead_of_reconnecting() {
+        assert_incompatible::<LatestChan>("latest", Cursor::new(EPOCH, 3), "77.9", 9);
+    }
+
+    #[test]
+    fn an_undecodable_event_is_checked_only_when_it_would_be_delivered() {
+        let mut c = client::<LogChan>(Some(Cursor::new(EPOCH, 3)));
+        open(&mut c, "log", "77.9");
+        assert!(
+            step(&mut c, new_variant(3)).is_empty(),
+            "a duplicate is dropped"
+        );
+        let out = step(&mut c, new_variant(6));
+        assert_eq!(out[0], Output::Close, "a gap is a protocol error first");
+        assert!(matches!(c.status(), Status::Waiting { .. }));
+        // An event frame without its payload is malformed, not incompatible.
+        let mut c = client::<LogChan>(Some(Cursor::new(EPOCH, 3)));
+        open(&mut c, "log", "77.9");
+        step(&mut c, text(r#"{"t":"event","seq":4}"#));
+        assert!(matches!(c.status(), Status::Waiting { .. }));
     }
 
     #[test]
