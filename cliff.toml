@@ -1,7 +1,8 @@
 # git-cliff configuration: https://git-cliff.org/docs/configuration
 #
-# Generates CHANGELOG.md from conventional commits. cargo-release runs it as a pre-release
-# hook: see [workspace.metadata.release] in Cargo.toml.
+# Drafts changelog entries from the conventional commits: `git cliff --unreleased`.
+# CHANGELOG.md is written by hand: edit the draft into its Unreleased section. cargo-release
+# dates that section at release time, so the curated notes are kept.
 
 [changelog]
 header = """
@@ -23,7 +24,7 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
-- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | upper_first }}\
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking %}**Breaking:** {% endif %}{{ commit.message | upper_first }}{% if commit.breaking and commit.breaking_description and commit.breaking_description != commit.message %}: {{ commit.breaking_description }}{% endif %}\
 {% endfor %}
 {% endfor %}
 

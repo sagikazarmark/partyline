@@ -61,7 +61,9 @@ worker = "0.8.7"
 proptest = "1.11"
 wasm-bindgen-test = "0.3"
 
-# cargo-release: bumps the shared version, writes CHANGELOG.md, commits, tags, and pushes.
+# cargo-release: bumps the shared version, dates the Unreleased section of CHANGELOG.md, commits,
+# tags, and pushes. The changelog is written by hand; the replacements live in
+# crates/partyline/Cargo.toml, so they run once.
 # The release workflow publishes to crates.io when the tag arrives.
 [workspace.metadata.release]
 allow-branch = ["main"]
@@ -72,12 +74,6 @@ consolidate-commits = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
 publish = false
-# Writes CHANGELOG.md with git-cliff (cliff.toml). cargo-release runs the hook once per crate;
-# the output is the same each time. A dry run leaves the file alone.
-pre-release-hook = [
-    "sh", "-c",
-    '[ "$DRY_RUN" = true ] && exit 0; cd "$WORKSPACE_ROOT" && git cliff --output CHANGELOG.md --tag "v$NEW_VERSION"',
-]
 
 [workspace.lints.rust]
 missing_docs = "warn"

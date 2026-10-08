@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** **client:** `Status::Stopped` carries a `StopReason`: `App`, `Closed(code)`, `Incompatible { seq }`, or `InvalidUrl`. `Status::Waiting` and `Status::Unauthorized` carry the attempt number, and `Waiting` carries the last close code.
 - **Breaking:** **client:** An event the client cannot decode stops it with `StopReason::Incompatible`, instead of reconnecting forever. Prompt the user to reload.
-- **Breaking:** **dioxus:** The `use_channel_reducer` refetch returns `Result<(S, Cursor), E>`, and a failed refetch is retried. The reducer state resets when the channel ID changes.
+- **Breaking:** **dioxus:** `use_channel_reducer` takes `initial` as `impl FnMut() -> S`, because it runs again when the channel ID changes, and `refetch` returns `Result<(S, Cursor), E>` with `E: Display`. A failed refetch is retried after 1 s, doubling up to 30 s. Update calls such as `use_channel_reducer::<C, S, _, _>(..)` to `use_channel_reducer::<C, S, _, _, _>(..)`, and wrap the refetch result in `Ok`.
+- **Breaking:** **client:** `ClientEvent::Event` has an `epoch` field. A pattern that lists the fields needs `..` or `epoch`.
 - **dioxus:** The hooks restart when the base URL or the client config changes. A new token provider takes effect at the next connect, without a restart.
 - **client:** A wake (page visible, network online, back-forward cache restore, `resume`, network change) resets the backoff, and replaces a connect attempt that started while offline.
 - **worker:** `Connect::forward` fails for an invalid tag: empty, longer than 256 characters, or more than 10 tags. Tags are percent-encoded on the way to the Durable Object, so non-ASCII tags work.
