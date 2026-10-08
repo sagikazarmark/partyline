@@ -71,6 +71,7 @@ See [how to authenticate with Clerk](https://github.com/sagikazarmark/partyline/
 | Feature | Effect |
 | --- | --- |
 | `web-wake` | Wakes the client in the browser on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume` after a freeze, and `navigator.connection` changes where supported |
+| `tracing` | Logs every driver input and output at `trace`, and transport errors at `debug`, with the [`tracing`](https://docs.rs/tracing) crate |
 
 Native targets have no wake source. The heartbeat finds a dead socket within 35 s with the default settings.
 

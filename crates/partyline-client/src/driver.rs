@@ -43,6 +43,10 @@ pub(crate) async fn run<C: Channel, T: Transport>(
         token,
         config,
     } = options;
+    let log = Log {
+        channel: C::NAME,
+        id: &id,
+    };
     let base = match base_url.resolve() {
         Ok(base) => base,
         Err(e) => {
@@ -96,7 +100,10 @@ pub(crate) async fn run<C: Channel, T: Transport>(
                                 conn = Some(c);
                                 Input::Opened
                             }
-                            Err(_) => Input::Closed { code: None },
+                            Err(error) => {
+                                log.transport_error("connect", &error);
+                                Input::Closed { code: None }
+                            }
                         });
                     }
                     if let Some(c) = conn.as_mut() {
@@ -108,7 +115,12 @@ pub(crate) async fn run<C: Channel, T: Transport>(
                                 conn = None;
                                 return Poll::Ready(Input::Closed { code });
                             }
-                            Poll::Ready(Some(Err(_)) | None) => {
+                            Poll::Ready(Some(Err(error))) => {
+                                conn = None;
+                                log.transport_error("receive", &error);
+                                return Poll::Ready(Input::Closed { code: None });
+                            }
+                            Poll::Ready(None) => {
                                 conn = None;
                                 return Poll::Ready(Input::Closed { code: None });
                             }
@@ -121,9 +133,11 @@ pub(crate) async fn run<C: Channel, T: Transport>(
             }
         };
 
+        log.input(&input);
         client.handle(input, &mut out);
         let mut stopped = false;
         for output in out.drain(..) {
+            log.output(&output);
             match output {
                 Output::Connect { cursor } => {
                     conn = None;
@@ -140,8 +154,9 @@ pub(crate) async fn run<C: Channel, T: Transport>(
                 }
                 Output::Send(message) => {
                     if let Some(c) = conn.as_mut()
-                        && c.send(message).await.is_err()
+                        && let Err(error) = c.send(message).await
                     {
+                        log.transport_error("send", &error);
                         conn = None;
                         pending.push_back(Input::Closed { code: None });
                     }
@@ -150,7 +165,11 @@ pub(crate) async fn run<C: Channel, T: Transport>(
                     connecting = None;
                     if let Some(mut c) = conn.take() {
                         let closing = pin!(c.close());
-                        let _ = select(closing, Delay::new(CLOSE_TIMEOUT)).await;
+                        if let futures::future::Either::Left((Err(error), _)) =
+                            select(closing, Delay::new(CLOSE_TIMEOUT)).await
+                        {
+                            log.transport_error("close", &error);
+                        }
                     }
                 }
                 Output::SetTimer { id, after } => {
@@ -193,6 +212,82 @@ async fn open<T: Transport>(
     };
     let url = format!("{url}?{}", ConnectParams::new(cursor, token).to_query());
     transport.connect(&url).await
+}
+
+/// Driver logging. It logs only with the `tracing` feature.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "tracing"), allow(dead_code))]
+struct Log<'a> {
+    channel: &'static str,
+    id: &'a str,
+}
+
+#[cfg(feature = "tracing")]
+impl Log<'_> {
+    fn input(&self, input: &Input) {
+        tracing::trace!(
+            channel = self.channel,
+            id = self.id,
+            ?input,
+            "partyline input"
+        );
+    }
+
+    fn output<E>(&self, output: &Output<E>) {
+        tracing::trace!(
+            channel = self.channel,
+            id = self.id,
+            output = ?OutputSummary(output),
+            "partyline output"
+        );
+    }
+
+    fn transport_error(&self, during: &str, error: &TransportError) {
+        tracing::debug!(
+            channel = self.channel,
+            id = self.id,
+            during,
+            %error,
+            "partyline transport error"
+        );
+    }
+}
+
+#[cfg(not(feature = "tracing"))]
+impl Log<'_> {
+    fn input(&self, _: &Input) {}
+
+    fn output<E>(&self, _: &Output<E>) {}
+
+    fn transport_error(&self, _: &str, _: &TransportError) {}
+}
+
+/// An output without its event payload, which need not implement `Debug`.
+#[cfg(feature = "tracing")]
+struct OutputSummary<'a, E>(&'a Output<E>);
+
+#[cfg(feature = "tracing")]
+impl<E> std::fmt::Debug for OutputSummary<'_, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Output::Connect { cursor } => {
+                f.debug_struct("Connect").field("cursor", cursor).finish()
+            }
+            Output::Send(message) => f.debug_tuple("Send").field(message).finish(),
+            Output::Close => f.write_str("Close"),
+            Output::SetTimer { id, after } => f
+                .debug_struct("SetTimer")
+                .field("id", id)
+                .field("after", after)
+                .finish(),
+            Output::Event { seq, .. } => f
+                .debug_struct("Event")
+                .field("seq", seq)
+                .finish_non_exhaustive(),
+            Output::Reset => f.write_str("Reset"),
+            Output::Status(status) => f.debug_tuple("Status").field(status).finish(),
+        }
+    }
 }
 
 fn log_error(message: &str) {
