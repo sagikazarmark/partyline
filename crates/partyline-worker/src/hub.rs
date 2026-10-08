@@ -281,6 +281,10 @@ impl<C: Channel> Hub<C> {
     }
 
     /// Completes the close handshake for a socket the client closed.
+    ///
+    /// The runtime reports 1005, 1006, and 1015 when the client sent no close frame. Then
+    /// there is no handshake to complete, and a close frame sent on the dead transport
+    /// would fail later, outside this handler, so none is sent.
     pub async fn on_close(
         &self,
         ws: WebSocket,
@@ -288,10 +292,9 @@ impl<C: Channel> Hub<C> {
         reason: String,
         _was_clean: bool,
     ) -> worker::Result<()> {
-        // 1005, 1006, and 1015 are reserved and cannot be sent.
         let code = match u16::try_from(code) {
-            Ok(code) if code >= 1000 && !matches!(code, 1005 | 1006 | 1015) => code,
-            _ => close::NORMAL,
+            Ok(code @ 1000..=4999) if !matches!(code, 1005 | 1006 | 1015) => code,
+            _ => return Ok(()),
         };
         let _ = ws.close(Some(code), Some(reason));
         Ok(())
