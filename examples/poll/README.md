@@ -40,7 +40,7 @@ A vote travels over HTTP: the phone sends `POST /api/polls/{id}/vote`, `PollObje
 
 - A rate limit on the vote route: 20 votes per client IP per 10 seconds.
 - A small retention window: 200 activity events.
-- A daily reset at midnight UTC, from `PollObject`'s alarm.
+- A daily reset at midnight UTC, from `PollObject`'s alarm. The object shares the alarm with its hub: see [how to share the alarm](../../docs/how-to/share-the-alarm.md).
 - A custom subdomain, so zone-level rate limiting and firewall rules apply.
 
 ## Run it

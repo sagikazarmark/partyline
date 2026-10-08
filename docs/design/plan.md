@@ -2,6 +2,8 @@
 
 Oct 7, 2026 · @Mark
 
+> This is a design record. The implementation differs in places: [M0 spike notes](m0-spike.md) lists every change. For current usage, see the [documentation index](../README.md).
+
 ## Summary
 
 partyline is four Rust crates that push sequenced, resumable events from a Cloudflare Durable Object to Dioxus clients over WebSockets. A client that loses its connection reconnects with its last sequence number and receives exactly the events it missed.
@@ -725,4 +727,3 @@ Still open:
 
 - [ ] License.
 - [ ] Is the `partyline` repository name free on GitHub under the intended owner?
-

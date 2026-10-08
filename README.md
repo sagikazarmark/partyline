@@ -61,25 +61,21 @@ impl DurableObject for OrderChannel {
         Self { hub: Hub::new(state, HubConfig::default()) }
     }
 
-    async fn fetch(&self, mut req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         match req.path().as_str() {
             // The order and the channel head it was read at, in one turn.
             "/order" => Response::from_json(&OrderSnapshot {
                 order: self.load()?,
                 head: self.hub.head()?,
             }),
-            // `Publisher::publish` lands here: apply the event, then publish it.
-            "/publish" => {
-                let event: OrderEvent = req.json().await?;
-                self.apply(&event)?;
-                Response::ok(self.hub.publish(&event).await?.to_string())
-            }
-            // WebSocket upgrades and the hub's own routes.
-            _ => self.hub.fetch(req).await,
+            // WebSocket upgrades and the hub's own routes. `Publisher::publish` lands here:
+            // the closure applies each event in the same turn as the hub stores and sends it.
+            _ => self.hub.fetch_with(req, |event| self.apply(event)).await,
         }
     }
 
     // websocket_message, websocket_close, websocket_error, and alarm delegate to the hub.
+    partyline_worker::hub_handlers!(hub);
 }
 ```
 
@@ -102,9 +98,11 @@ A channel with no state of its own needs no hand-written object: `channel_object
 **3. Route upgrades and publish** from the Worker:
 
 ```rust
-// GET /partyline/orders/{id}. Decode the ID, authorize, then forward.
-let order_id = decode_segment(raw_id).ok_or("invalid id")?;
-Connect::<Orders>::new(&order_id).forward(&env, "ORDER_CHANNEL", req).await
+// GET /partyline/orders/{id}. Match the path and decode the ID, authorize, then forward.
+let Some(Ok(connect)) = Connect::<Orders>::from_path(&req.path()) else {
+    return reject(close::BAD_REQUEST, "invalid id");
+};
+connect.forward(&env, "ORDER_CHANNEL", req).await
 
 // From any code path:
 Publisher::<Orders>::new(&env, "ORDER_CHANNEL")?
@@ -131,10 +129,16 @@ fn OrderStatus(id: String, initial: Order, head: Cursor) -> Element {
 
 ## Documentation
 
+The [documentation index](docs/README.md) lists every page. Good places to start:
+
+- [Tutorial: your first channel](docs/tutorial/first-channel.md)
+- [How partyline works](docs/explanation/how-it-works.md)
+- [Choosing a mode](docs/explanation/choosing-a-mode.md)
 - [Protocol reference](docs/protocol.md)
 - [How to authenticate connections with Clerk](docs/how-to/authenticate-with-clerk.md)
-- [Testing, including the manual hibernation check and the phone matrix](docs/testing.md)
-- [M0 spike notes: the `worker` API findings](docs/m0-spike.md)
+- [Changelog](CHANGELOG.md)
+
+For contributors: [Testing](docs/testing.md) and the design records: the [implementation plan](docs/design/plan.md) and the [M0 spike notes](docs/design/m0-spike.md).
 
 ## Development
 
