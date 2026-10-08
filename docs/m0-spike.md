@@ -51,6 +51,7 @@ The implementation follows the plan, with these changes. Each one came from a pr
 | Replay limit | No replay cap: retention bounds the replay | Retention, plus a byte budget: `HubConfig::max_replay_bytes`, 8 MiB by default. A longer replay, or a retained range with a hole, gets `Reset` | A Durable Object has 128 MB of memory, and a replay is built in one turn. A `Reset` and a refetch are always correct |
 | Event size | A target of 16 KB, not enforced | `HubConfig::max_event_bytes`, 64 KiB by default. A larger publish fails with HTTP 413 | A large event is a bug in the app. Failing the publish shows it at once |
 | Handler delegation | Write each handler, or generate the whole object | Also `hub_handlers!` and `hub_websocket_handlers!` inside a hand-written `impl DurableObject`, and `Hub::fetch_with` to apply each published event in the object | Objects with their own state repeated the same four handlers and matched the hub's internal `/publish` route by hand |
+| Alarm | The hub owns the alarm | `Hub::schedule_alarm` keeps the earlier of two alarm times, so an object and its hub share the one alarm | A Durable Object has one alarm. The demo needs a daily reset next to the hub's trimming |
 
 ## Tooling notes
 

@@ -56,6 +56,16 @@ impl DurableObject for OrderChannel {
 
 See [`examples/orders`](https://github.com/sagikazarmark/partyline/tree/main/examples/orders) for the full object.
 
+## Share the alarm
+
+A Durable Object has one alarm, and a Log-mode hub uses it for age-based trimming.
+An object that needs its own alarm uses `hub_websocket_handlers!` and writes `alarm` itself:
+
+- Schedule with `Hub::schedule_alarm(at_ms)`. It keeps the earlier of the current alarm and `at_ms`, and the hub schedules its trimming the same way.
+- In `alarm`, call `Hub::on_alarm` first, then do the object's own work only if it is due, then schedule its next time again. The alarm can fire early for either side.
+
+See `PollObject` in [`examples/poll`](https://github.com/sagikazarmark/partyline/tree/main/examples/poll).
+
 ## Use it from the Worker
 
 Route parameters usually arrive percent-encoded, because the client encodes the channel ID in the connect path. Decode the ID with `decode_segment` before you pass it to `Connect` or `Publisher`, so both name the same Durable Object. axum's `Path` extractor decodes for you.

@@ -139,7 +139,8 @@ macro_rules! hub_handlers {
 /// Generates the `websocket_message`, `websocket_close`, and `websocket_error` handlers of a
 /// Durable Object that embeds a [`Hub`], delegating each to the hub.
 ///
-/// Use it in an object with its own alarm. Its `alarm` handler calls [`Hub::on_alarm`].
+/// Use it in an object with its own alarm. Its `alarm` handler calls [`Hub::on_alarm`]; see
+/// [the `Hub` docs](Hub#alarms).
 ///
 /// ```ignore
 /// impl DurableObject for PollObject {
@@ -148,8 +149,9 @@ macro_rules! hub_handlers {
 ///     partyline_worker::hub_websocket_handlers!(hub);
 ///
 ///     async fn alarm(&self) -> Result<Response> {
-///         // The object's own work, then the hub's trimming.
-///         self.hub.on_alarm().await
+///         self.hub.on_alarm().await?;
+///         // The object's own work, if due, then schedule its next time again.
+///         Response::ok("")
 ///     }
 /// }
 /// ```

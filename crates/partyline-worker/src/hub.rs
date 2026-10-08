@@ -102,6 +102,14 @@ impl HubConfig {
 ///     partyline_worker::hub_handlers!(hub);
 /// }
 /// ```
+///
+/// # Alarms
+///
+/// A Durable Object has one alarm. The hub uses it for age-based trimming in [`Mode::Log`].
+/// An object that needs its own alarm shares it: both sides schedule with
+/// [`Hub::schedule_alarm`], which keeps the earlier time, and the object's `alarm` handler
+/// calls [`Hub::on_alarm`], then does its own work only if it is due, then schedules its
+/// next time again. An alarm can fire early for either side, so each checks its own time.
 pub struct Hub<C: Channel> {
     state: State,
     config: HubConfig,
@@ -374,6 +382,9 @@ impl<C: Channel> Hub<C> {
     }
 
     /// Runs age-based trimming, so idle channels are trimmed too, and schedules the next run.
+    ///
+    /// Call it from the object's `alarm` handler on every alarm, even one the object set
+    /// for itself. It does nothing when no event has expired.
     pub async fn on_alarm(&self) -> worker::Result<Response> {
         let retention = self.config.retention(C::MODE);
         self.log().trim(&retention, now_ms())?;
@@ -381,7 +392,23 @@ impl<C: Channel> Hub<C> {
         Response::ok("")
     }
 
-    /// Sets an alarm for when the oldest event expires, unless one is set or nothing expires.
+    /// Sets the Durable Object's alarm to `at_ms`, in milliseconds since the Unix epoch,
+    /// unless an earlier alarm is already set.
+    ///
+    /// The hub schedules its trimming with this too, so the object and the hub can share the
+    /// one alarm a Durable Object has. See [the type docs](Hub#alarms).
+    pub async fn schedule_alarm(&self, at_ms: u64) -> worker::Result<()> {
+        let storage = self.state.storage();
+        if let Some(existing) = storage.get_alarm().await?
+            && existing <= at_ms as i64
+        {
+            return Ok(());
+        }
+        let date = worker::js_sys::Date::new(&(at_ms as f64).into());
+        storage.set_alarm(ScheduledTime::new(date)).await
+    }
+
+    /// Schedules an alarm for when the oldest event expires, if any event expires.
     async fn schedule_trim(&self, retention: &Retention) -> worker::Result<()> {
         let Some(max_age) = retention.max_age else {
             return Ok(());
@@ -389,13 +416,8 @@ impl<C: Channel> Hub<C> {
         let Some(oldest) = self.log().oldest_ts()? else {
             return Ok(());
         };
-        let storage = self.state.storage();
-        if storage.get_alarm().await?.is_some() {
-            return Ok(());
-        }
-        let at = oldest + max_age.as_millis() as u64 + 1;
-        let date = worker::js_sys::Date::new(&(at as f64).into());
-        storage.set_alarm(ScheduledTime::new(date)).await
+        self.schedule_alarm(oldest + max_age.as_millis() as u64 + 1)
+            .await
     }
 }
 
