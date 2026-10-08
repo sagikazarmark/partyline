@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use partyline::frame::{ConnectParams, PING, PONG};
+use partyline::frame::{ConnectParams, PING, PONG, decode_segment};
 use partyline::server::{self, Log, Retention, ServerError};
 use partyline::{Channel, Cursor, Mode, close, codec};
 use worker::{
@@ -13,12 +13,16 @@ use worker::{
 
 use crate::sql_log::SqlLog;
 
-/// The header the Worker uses to pass socket tags to the hub. The hub ignores this header
-/// unless [`crate::Connect`] set it, because `Connect` strips it from client requests.
+/// The header the Worker uses to pass socket tags to the hub: a percent-encoded JSON array.
+/// The hub ignores this header unless [`crate::Connect`] set it, because `Connect` strips it
+/// from client requests.
 pub(crate) const TAGS_HEADER: &str = "x-partyline-tags";
 
 /// The most tags a socket can carry. The runtime allows 10.
-const MAX_TAGS: usize = 10;
+pub(crate) const MAX_TAGS: usize = 10;
+
+/// The longest tag, in UTF-16 code units, as the runtime counts.
+const MAX_TAG_LEN: usize = 256;
 
 /// The longest close reason, in bytes. The WebSocket protocol allows 123.
 const MAX_REASON_BYTES: usize = 123;
@@ -192,9 +196,23 @@ impl<C: Channel> Hub<C> {
         let tags = req
             .headers()
             .get(TAGS_HEADER)?
+            .and_then(|header| decode_segment(&header))
             .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
             .unwrap_or_default();
-        let tags: Vec<&str> = tags.iter().map(String::as_str).take(MAX_TAGS).collect();
+        // `Connect` validates tags. An invalid one would make the runtime throw, which
+        // aborts the Durable Object, so drop any that slip through.
+        let tags: Vec<&str> = tags
+            .iter()
+            .map(String::as_str)
+            .filter(|tag| match check_tag(tag) {
+                Ok(()) => true,
+                Err(e) => {
+                    worker::console_error!("partyline: dropping socket tag: {e}");
+                    false
+                }
+            })
+            .take(MAX_TAGS)
+            .collect();
         self.state.accept_websocket_with_tags(&pair.server, &tags);
 
         match server::handshake(C::MODE, params.cursor, &self.log()) {
@@ -348,6 +366,19 @@ impl PublishError {
     }
 }
 
+/// Checks a socket tag against the runtime's rules: not empty, at most 256 characters.
+pub(crate) fn check_tag(tag: &str) -> Result<(), String> {
+    if tag.is_empty() {
+        return Err("a socket tag must not be empty".to_owned());
+    }
+    if tag.encode_utf16().count() > MAX_TAG_LEN {
+        return Err(format!(
+            "a socket tag must be at most {MAX_TAG_LEN} characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Shortens a close reason to the 123 bytes the protocol allows, at a character boundary.
 /// A longer reason makes `close` throw.
 pub(crate) fn close_reason(reason: &str) -> &str {
@@ -385,5 +416,13 @@ mod tests {
         assert_eq!(cut.len(), 122);
         assert!(cut.chars().all(|c| c == 'é'));
         assert_eq!(close_reason(&"a".repeat(200)).len(), 123);
+    }
+
+    #[test]
+    fn tags_follow_the_runtime_rules() {
+        assert!(check_tag("user-1").is_ok());
+        assert!(check_tag("").is_err());
+        assert!(check_tag(&"日".repeat(256)).is_ok());
+        assert!(check_tag(&"a".repeat(257)).is_err());
     }
 }

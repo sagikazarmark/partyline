@@ -281,3 +281,24 @@ async fn the_real_client_receives_reset_after_a_channel_reset() {
     assert_eq!(event, ClientEvent::Event { seq: 1, event: 9 });
     handle.stop();
 }
+
+#[tokio::test]
+async fn non_ascii_tags_work_and_invalid_tags_are_refused() {
+    let Some(base) = base() else { return };
+    let id = unique("tags-utf8");
+    let user = "Usuário 日本";
+    let mut ws = open_with(&base, &id, None, &format!("&user={}", encode_segment(user))).await;
+    hello(&mut ws).await;
+    let closed = post(
+        &base,
+        &format!("/api/ticks/{id}/close?tag={}", encode_segment(user)),
+    )
+    .await;
+    assert_eq!(closed, "1");
+    assert_eq!(close_code(&mut ws).await, Some(close::FORBIDDEN));
+
+    // An empty tag would make the runtime throw, so `Connect` refuses to forward.
+    let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
+    let url = format!("{ws_base}{}?v=1&user=", connect_path("ticks", &id));
+    assert!(tokio_tungstenite::connect_async(url).await.is_err());
+}

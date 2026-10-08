@@ -2,10 +2,11 @@
 
 use std::marker::PhantomData;
 
+use partyline::frame::encode_segment;
 use partyline::{Channel, Cursor, codec};
 use worker::{Env, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
 
-use crate::hub::{TAGS_HEADER, close_reason, is_upgrade};
+use crate::hub::{MAX_TAGS, TAGS_HEADER, check_tag, close_reason, is_upgrade};
 
 /// The base URL of internal requests to the hub. The host is never resolved.
 const INTERNAL: &str = "https://partyline.internal";
@@ -48,7 +49,9 @@ impl<C: Channel> Connect<C> {
     }
 
     /// Adds a socket tag, such as the user ID. [`Publisher::close_tagged`] closes sockets by tag.
-    /// A socket carries at most 10 tags of at most 256 characters each.
+    ///
+    /// A socket carries at most 10 tags. Each must be non-empty and at most 256 characters.
+    /// [`Connect::forward`] fails if a tag breaks these rules.
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
@@ -59,13 +62,23 @@ impl<C: Channel> Connect<C> {
         if !is_upgrade(&req) {
             return Response::error("Expected a WebSocket upgrade", 426);
         }
+        if self.tags.len() > MAX_TAGS {
+            return Err(worker::Error::RustError(format!(
+                "a socket carries at most {MAX_TAGS} tags, got {}",
+                self.tags.len()
+            )));
+        }
+        for tag in &self.tags {
+            check_tag(tag).map_err(worker::Error::RustError)?;
+        }
         // Copy the headers, replacing any tags header the client sent.
         let headers = req.headers().clone();
         headers.delete(TAGS_HEADER)?;
         if !self.tags.is_empty() {
             let tags = serde_json::to_string(&self.tags)
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
-            headers.set(TAGS_HEADER, &tags)?;
+            // Header values must be ASCII, and tags are often names.
+            headers.set(TAGS_HEADER, &encode_segment(&tags))?;
         }
         let mut init = RequestInit::new();
         init.with_method(Method::Get).with_headers(headers);
