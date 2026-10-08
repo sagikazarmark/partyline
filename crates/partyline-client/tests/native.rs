@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use partyline::frame::ConnectParams;
 use partyline::server::{self, Log, MemLog, Retention};
-use partyline::{Channel, ClientConfig, Cursor, Message, Mode, Status, close, codec};
+use partyline::{Channel, ClientConfig, Cursor, Message, Mode, Status, StopReason, close, codec};
 use partyline_client::{
     BaseUrl, ClientEvent, ConnectOptions, NativeSocket, TokenProvider, TokenRequest, Transport,
     TransportError,
@@ -272,7 +272,9 @@ async fn driver_resumes_after_connection_loss() {
 
     handle.stop();
     wait_for(&mut events, |e| {
-        *e == ClientEvent::Status(Status::Stopped { code: None })
+        *e == ClientEvent::Status(Status::Stopped {
+            reason: StopReason::App,
+        })
     })
     .await;
     tokio::time::timeout(Duration::from_secs(5), driver)
@@ -291,7 +293,7 @@ async fn driver_stops_on_a_terminal_close_code() {
     server.close_all(close::FORBIDDEN);
     wait_for(&mut events, |e| {
         *e == ClientEvent::Status(Status::Stopped {
-            code: Some(close::FORBIDDEN),
+            reason: StopReason::Closed(close::FORBIDDEN),
         })
     })
     .await;
@@ -302,11 +304,26 @@ async fn driver_stops_on_a_terminal_close_code() {
     assert_eq!(
         handle.status(),
         Status::Stopped {
-            code: Some(close::FORBIDDEN)
+            reason: StopReason::Closed(close::FORBIDDEN),
         }
     );
 }
 
+#[tokio::test]
+async fn driver_stops_on_an_invalid_base_url() {
+    let (handle, mut events, driver) = partyline_client::connect::<Counter>(ConnectOptions::new(
+        BaseUrl::Explicit("ftp://example.com".into()),
+        "x",
+    ));
+    tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the driver ends");
+    let stopped = Status::Stopped {
+        reason: StopReason::InvalidUrl,
+    };
+    assert_eq!(events.next().await, Some(ClientEvent::Status(stopped)));
+    assert_eq!(handle.status(), stopped);
+}
 #[tokio::test]
 async fn driver_asks_the_token_provider_before_every_connect() {
     let server = TestServer::start().await;

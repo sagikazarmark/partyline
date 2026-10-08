@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 use partyline::frame::encode_segment;
 use partyline_dioxus::{
-    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, use_channel,
+    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, StopReason, use_channel,
 };
 use poll_shared::{ActivityEvent, PollActivity, PollSnapshot, PollTally, Tally, Vote};
 
@@ -182,7 +182,7 @@ fn StatusBadge(state: PollState) -> Element {
             "bg-emerald-500 animate-pulse",
             "Live".to_owned(),
         ),
-        Status::Waiting { retry_in } | Status::Unauthorized { retry_in } => (
+        Status::Waiting { retry_in, .. } | Status::Unauthorized { retry_in, .. } => (
             "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
             "bg-amber-500",
             format!("Reconnecting in {:.1} s", retry_in.as_secs_f32()),
@@ -337,7 +337,9 @@ fn Phone(id: String) -> Element {
                 replayed.set(None);
                 online.set(false);
                 let mut status = state.status;
-                status.set(Status::Stopped { code: None });
+                status.set(Status::Stopped {
+                    reason: StopReason::App,
+                });
             } else {
                 // The replay count is the difference between the head now and the cursor.
                 let id = id.clone();

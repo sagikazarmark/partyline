@@ -13,7 +13,7 @@ use futures::future::{poll_fn, select};
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_timer::Delay;
 use partyline::frame::{ConnectParams, connect_path};
-use partyline::{Channel, Client, Cursor, Input, Output, Status, TimerId};
+use partyline::{Channel, Client, Cursor, Input, Output, Status, StopReason, TimerId};
 
 use crate::transport::{Transport, TransportError};
 use crate::{ClientEvent, Command, ConnectOptions, Shared, TokenProvider, TokenRequest};
@@ -47,7 +47,9 @@ pub(crate) async fn run<C: Channel, T: Transport>(
         Ok(base) => base,
         Err(e) => {
             log_error(&format!("partyline: {e}"));
-            let status = Status::Stopped { code: None };
+            let status = Status::Stopped {
+                reason: StopReason::InvalidUrl,
+            };
             shared.set_status(status);
             let _ = events.unbounded_send(ClientEvent::Status(status));
             return;

@@ -49,7 +49,7 @@ pub mod testing;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-pub use client::{Client, ClientConfig, Input, Output, Status, TimerId};
+pub use client::{Client, ClientConfig, Input, Output, Status, StopReason, TimerId};
 pub use frame::{Cursor, Message, Mode, ServerFrame, close};
 
 /// A channel definition, shared by the server and the client.

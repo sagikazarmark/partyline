@@ -36,6 +36,25 @@ handle.wake(); // connect now, or probe an open socket
 handle.stop(); // close with 1000 and end the driver
 ```
 
+## Status
+
+| Status | Meaning |
+| --- | --- |
+| `Idle` | Not started |
+| `Connecting` | Opening a socket and waiting for `Hello` |
+| `Open` | Connected and receiving events |
+| `Waiting { retry_in, attempt, last_code }` | Waiting `retry_in` before connect attempt `attempt`. `last_code` is the close code of the failed connection |
+| `Unauthorized { retry_in, attempt }` | The server rejected the token. The next connect asks the token provider for a fresh one |
+| `Stopped { reason }` | Stopped for good. The driver has ended |
+
+`StopReason` says why the client stopped:
+
+| Reason | Meaning |
+| --- | --- |
+| `App` | The app called `stop`, or dropped every handle |
+| `Closed(code)` | The server closed with a terminal code, such as 4403 |
+| `InvalidUrl` | The base URL could not be resolved |
+
 ## Authentication
 
 Set a `TokenProvider`. The driver calls it before every connect and puts the result in the `token` query parameter, because browsers cannot set headers on a WebSocket.

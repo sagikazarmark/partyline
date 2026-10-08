@@ -51,7 +51,7 @@ use dioxus::prelude::*;
 use futures::StreamExt;
 use partyline_client::{ClientEvent, ConnectOptions, Handle};
 
-pub use partyline::{Channel, ClientConfig, Cursor, Mode, Status};
+pub use partyline::{Channel, ClientConfig, Cursor, Mode, Status, StopReason};
 pub use partyline_client::{BaseUrl, TokenProvider, TokenRequest};
 
 /// Settings shared by every hook below a [`PartylineProvider`].

@@ -56,7 +56,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use futures::channel::mpsc;
 
-pub use partyline::{self, Channel, ClientConfig, Cursor, Status};
+pub use partyline::{self, Channel, ClientConfig, Cursor, Status, StopReason};
 pub use transport::{DefaultTransport, Transport, TransportError};
 
 #[cfg(target_arch = "wasm32")]

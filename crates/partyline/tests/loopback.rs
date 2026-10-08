@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use partyline::server::Retention;
 use partyline::testing::{Faults, Loopback, Observed, check_latest_delivery, check_log_delivery};
-use partyline::{Channel, ClientConfig, Cursor, Mode, Status};
+use partyline::{Channel, ClientConfig, Cursor, Mode, Status, StopReason};
 use proptest::prelude::*;
 
 struct LogChan;
@@ -231,7 +231,7 @@ fn a_forbidden_close_stops_the_client() {
     assert_eq!(
         lb.client().status(),
         Status::Stopped {
-            code: Some(partyline::close::FORBIDDEN)
+            reason: StopReason::Closed(partyline::close::FORBIDDEN)
         }
     );
     assert_eq!(lb.stats().connects, 1);

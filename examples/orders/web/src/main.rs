@@ -74,7 +74,7 @@ fn StatusBadge(status: Status, cursor: Option<Cursor>) -> Element {
             "bg-emerald-500 animate-pulse",
             "Live".to_owned(),
         ),
-        Status::Waiting { retry_in } | Status::Unauthorized { retry_in } => (
+        Status::Waiting { retry_in, .. } | Status::Unauthorized { retry_in, .. } => (
             "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
             "bg-amber-500",
             format!("Reconnecting in {:.1} s", retry_in.as_secs_f32()),
