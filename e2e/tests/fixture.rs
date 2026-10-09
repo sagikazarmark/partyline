@@ -323,13 +323,7 @@ async fn the_token_is_stripped_but_the_cursor_is_kept() {
     let id = unique("token");
     let head = publish(&base, &id, 1).await;
     publish(&base, &id, 2).await;
-    let mut ws = open_with(
-        &base,
-        &id,
-        Some(Cursor::new(head.epoch, 1)),
-        "&token=%FF",
-    )
-    .await;
+    let mut ws = open_with(&base, &id, Some(Cursor::new(head.epoch, 1)), "&token=%FF").await;
     hello(&mut ws).await;
     assert_eq!(
         frame(&mut ws).await,
