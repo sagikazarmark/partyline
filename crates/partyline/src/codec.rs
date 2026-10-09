@@ -3,7 +3,7 @@
 //! The `Codec` trait is private. It becomes public when a second codec exists.
 
 use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde_json::value::RawValue;
 
 use crate::frame::ServerFrame;
@@ -50,6 +50,50 @@ pub fn decode_frame<E: DeserializeOwned>(text: &str) -> Result<ServerFrame<E>, C
     Json::decode(text.as_bytes())
 }
 
+/// A frame whose event payload is not decoded yet.
+pub type RawFrame = ServerFrame<Box<RawValue>>;
+
+/// Decodes the text of a WebSocket message as a frame, leaving the event payload undecoded.
+///
+/// A client decodes the envelope first and the payload with [`decode_payload`] second, so it
+/// can tell a malformed frame from a well-formed event its event type does not know.
+pub fn decode_envelope(text: &str) -> Result<RawFrame, CodecError> {
+    // An internally tagged enum buffers its fields, which `RawValue` does not support, so an
+    // event frame is decoded as a plain struct.
+    #[derive(serde::Deserialize)]
+    struct EventEnvelope {
+        seq: u64,
+        event: Box<RawValue>,
+    }
+    if tag(text).as_deref() == Some("event") {
+        let EventEnvelope { seq, event } = Json::decode(text.as_bytes())?;
+        return Ok(ServerFrame::Event { seq, event });
+    }
+    match Json::decode::<ServerFrame<IgnoredAny>>(text.as_bytes())? {
+        ServerFrame::Hello { v, mode, head } => Ok(ServerFrame::Hello { v, mode, head }),
+        ServerFrame::Reset { head } => Ok(ServerFrame::Reset { head }),
+        // Unreachable: the tag is not `event`.
+        ServerFrame::Event { .. } => Err(CodecError(
+            <serde_json::Error as serde::de::Error>::custom("ambiguous frame type"),
+        )),
+    }
+}
+
+/// Decodes the event payload of a frame decoded with [`decode_envelope`].
+pub fn decode_payload<E: DeserializeOwned>(raw: &RawValue) -> Result<E, CodecError> {
+    Json::decode(raw.get().as_bytes())
+}
+
+/// The `t` tag of a frame, if the text is a JSON object with a string tag.
+fn tag(text: &str) -> Option<std::borrow::Cow<'_, str>> {
+    #[derive(serde::Deserialize)]
+    struct Tag<'a> {
+        #[serde(borrow)]
+        t: std::borrow::Cow<'a, str>,
+    }
+    serde_json::from_str::<Tag<'_>>(text).ok().map(|tag| tag.t)
+}
+
 /// The frame types this version knows, by their `t` tag.
 const KNOWN_FRAME_TYPES: [&str; 3] = ["hello", "event", "reset"];
 
@@ -58,13 +102,7 @@ const KNOWN_FRAME_TYPES: [&str; 3] = ["hello", "event", "reset"];
 /// Clients ignore such frames, so a later protocol version can add frame types without
 /// breaking older clients. A malformed frame of a known type is still a protocol error.
 pub fn is_unknown_frame(text: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct Tag<'a> {
-        #[serde(borrow)]
-        t: std::borrow::Cow<'a, str>,
-    }
-    serde_json::from_str::<Tag<'_>>(text)
-        .is_ok_and(|tag| !KNOWN_FRAME_TYPES.contains(&tag.t.as_ref()))
+    tag(text).is_some_and(|t| !KNOWN_FRAME_TYPES.contains(&t.as_ref()))
 }
 
 /// Builds the text of an `Event` frame from an already encoded event body.
@@ -106,6 +144,50 @@ mod tests {
         assert!(!is_unknown_frame(r#"{"t":"hello"}"#));
         assert!(!is_unknown_frame(r#"{"no_tag":1}"#));
         assert!(!is_unknown_frame("not json"));
+    }
+
+    #[test]
+    fn envelopes_decode_without_their_payload() {
+        let frame = decode_envelope(r#"{"t":"event","seq":5,"event":{"type":"new"}}"#).unwrap();
+        let ServerFrame::Event { seq, event } = frame else {
+            panic!("an event frame: {frame:?}");
+        };
+        assert_eq!(seq, 5);
+        assert_eq!(event.get(), r#"{"type":"new"}"#);
+        assert!(
+            decode_payload::<u64>(&event).is_err(),
+            "the payload is checked apart"
+        );
+        assert_eq!(
+            decode_payload::<serde_json::Value>(&event).unwrap(),
+            serde_json::json!({"type": "new"})
+        );
+
+        let hello = r#"{"t":"hello","v":1,"mode":"log","head":"7.3","extra":1}"#;
+        let head = crate::Cursor::new(7, 3);
+        assert!(matches!(
+            decode_envelope(hello).unwrap(),
+            ServerFrame::Hello { v: 1, mode: crate::Mode::Log, head: h } if h == head
+        ));
+        assert!(matches!(
+            decode_envelope(r#"{"t":"reset","head":"7.3"}"#).unwrap(),
+            ServerFrame::Reset { head: h } if h == head
+        ));
+    }
+
+    #[test]
+    fn malformed_envelopes_are_errors() {
+        for bad in [
+            "not json",
+            r#"{"t":"event","seq":"x","event":1}"#,
+            r#"{"t":"event","seq":1}"#,
+            r#"{"t":"event","event":1}"#,
+            r#"{"t":"hello","v":1}"#,
+            r#"{"t":"reset"}"#,
+            r#"{"t":"snapshot"}"#,
+        ] {
+            assert!(decode_envelope(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

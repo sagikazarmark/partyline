@@ -36,6 +36,30 @@ handle.wake(); // connect now, or probe an open socket
 handle.stop(); // close with 1000 and end the driver
 ```
 
+## Status
+
+| Status | Meaning |
+| --- | --- |
+| `Idle` | Not started |
+| `Connecting` | Opening a socket and waiting for `Hello` |
+| `Open` | Connected and receiving events |
+| `Waiting { retry_in, attempt, last_code }` | Waiting `retry_in` before connect attempt `attempt`. `last_code` is the close code of the failed connection |
+| `Unauthorized { retry_in, attempt }` | The server rejected the token. The next connect asks the token provider for a fresh one |
+| `Stopped { reason }` | Stopped for good. The driver has ended |
+
+`StopReason` says why the client stopped:
+
+| Reason | Meaning |
+| --- | --- |
+| `App` | The app called `stop`, or dropped every handle |
+| `Closed(code)` | The server closed with a terminal code, such as 4403 |
+| `Incompatible { seq }` | The server sent an event this build cannot decode. The app is outdated: ask the user to reload. The client does not reconnect, because the server would replay the same event |
+| `InvalidUrl` | The base URL could not be resolved |
+
+## Wake
+
+`handle.wake()` resets the reconnect backoff and connects at once while waiting. A connect attempt in progress that did not start with a wake is replaced, because it likely started while offline. On an open socket it sends a ping with a short timeout, to find a dead socket quickly.
+
 ## Authentication
 
 Set a `TokenProvider`. The driver calls it before every connect and puts the result in the `token` query parameter, because browsers cannot set headers on a WebSocket.
@@ -46,7 +70,8 @@ See [how to authenticate with Clerk](https://github.com/sagikazarmark/partyline/
 
 | Feature | Effect |
 | --- | --- |
-| `web-wake` | Wakes the client on `visibilitychange` and `online` in the browser |
+| `web-wake` | Wakes the client in the browser on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume` after a freeze, and `navigator.connection` changes where supported |
+| `tracing` | Logs every driver input and output at `trace`, and transport errors at `debug`, with the [`tracing`](https://docs.rs/tracing) crate |
 
 Native targets have no wake source. The heartbeat finds a dead socket within 35 s with the default settings.
 

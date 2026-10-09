@@ -96,6 +96,8 @@ impl PollObject {
     }
 
     /// Zeroes the tally, wipes the activity log with a new epoch, and announces the reset.
+    ///
+    /// Each step is safe to repeat, so a reset that failed partway can run again.
     async fn reset(&self, poll: &str) -> Result<()> {
         self.sql().exec("DELETE FROM poll_votes", None)?;
         self.hub.publish(&Tally::default()).await?;
@@ -105,15 +107,45 @@ impl PollObject {
         Ok(())
     }
 
+    /// When the next daily reset is due, in milliseconds since the Unix epoch.
+    fn reset_at(&self) -> Result<Option<u64>> {
+        let row = self
+            .sql()
+            .exec("SELECT reset_at FROM poll_schedule WHERE id = 1", None)?
+            .raw()
+            .next()
+            .transpose()?;
+        Ok(match row.as_deref() {
+            Some([SqlStorageValue::Integer(at)]) => Some(*at as u64),
+            _ => None,
+        })
+    }
+
+    fn set_reset_at(&self, at: Option<u64>) -> Result<()> {
+        match at {
+            Some(at) => self.sql().exec(
+                "INSERT INTO poll_schedule (id, reset_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET reset_at = excluded.reset_at",
+                vec![(at as i64).into()],
+            )?,
+            None => self.sql().exec("DELETE FROM poll_schedule", None)?,
+        };
+        Ok(())
+    }
+
     /// Resets the poll at the next UTC midnight, so the public demo starts fresh each day.
+    ///
+    /// The object shares its alarm with the hub, so it records its own due time and
+    /// schedules with `Hub::schedule_alarm`, which keeps the earlier of the two.
     async fn schedule_daily_reset(&self) -> Result<()> {
-        let storage = self.hub.state().storage();
-        if storage.get_alarm().await?.is_some() {
-            return Ok(());
-        }
-        let next_midnight = (Date::now().as_millis() / DAY_MS + 1) * DAY_MS;
-        let date = js_sys::Date::new(&(next_midnight as f64).into());
-        storage.set_alarm(ScheduledTime::new(date)).await
+        let at = match self.reset_at()? {
+            Some(at) => at,
+            None => {
+                let next_midnight = (Date::now().as_millis() / DAY_MS + 1) * DAY_MS;
+                self.set_reset_at(Some(next_midnight))?;
+                next_midnight
+            }
+        };
+        self.hub.schedule_alarm(at).await
     }
 }
 
@@ -129,6 +161,7 @@ impl DurableObject for PollObject {
         for statement in [
             "CREATE TABLE IF NOT EXISTS poll_votes (option INTEGER PRIMARY KEY, count INTEGER NOT NULL)",
             "CREATE TABLE IF NOT EXISTS poll_meta (id INTEGER PRIMARY KEY CHECK (id = 1), poll TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS poll_schedule (id INTEGER PRIMARY KEY CHECK (id = 1), reset_at INTEGER NOT NULL)",
         ] {
             if let Err(e) = hub.state().storage().sql().exec(statement, None) {
                 console_error!("creating the poll tables failed: {e}");
@@ -155,34 +188,26 @@ impl DurableObject for PollObject {
         }
     }
 
-    async fn websocket_message(
-        &self,
-        ws: WebSocket,
-        message: WebSocketIncomingMessage,
-    ) -> Result<()> {
-        self.hub.on_message(ws, message).await
-    }
-
-    async fn websocket_close(
-        &self,
-        ws: WebSocket,
-        code: usize,
-        reason: String,
-        was_clean: bool,
-    ) -> Result<()> {
-        self.hub.on_close(ws, code, reason, was_clean).await
-    }
-
-    async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
-        self.hub.on_error(ws, error).await
-    }
+    partyline_worker::hub_websocket_handlers!(hub);
 
     async fn alarm(&self) -> Result<Response> {
-        // The daily reset. The hub has no age-based trimming in Latest mode.
-        if let Some(poll) = self.poll()? {
-            self.reset(&poll).await?;
+        // The hub trims its log if that is due. The tally is a Latest channel, so it never
+        // is here, but an object with a Log hub shares the alarm the same way.
+        self.hub.on_alarm().await?;
+        // The alarm is shared, so it can fire before the daily reset is due.
+        if let Some(at) = self.reset_at()? {
+            if Date::now().as_millis() >= at {
+                // Clear the deadline only after the reset succeeds. If a step fails, the
+                // runtime retries the alarm, and every step is safe to run again.
+                if let Some(poll) = self.poll()? {
+                    self.reset(&poll).await?;
+                }
+                self.set_reset_at(None)?;
+            } else {
+                self.hub.schedule_alarm(at).await?;
+            }
         }
-        self.hub.on_alarm().await
+        Response::ok("")
     }
 }
 

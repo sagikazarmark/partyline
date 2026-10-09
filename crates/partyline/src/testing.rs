@@ -299,7 +299,15 @@ impl<C: Channel> Loopback<C> {
     /// Publishes an event on the server and returns its sequence number.
     pub fn publish(&mut self, event: &C::Event) -> u64 {
         let body = codec::encode_event(event).expect("event encodes");
-        let (head, frame) = server::publish(&mut self.log, &body, &self.retention, self.now)
+        self.publish_body(&body)
+    }
+
+    /// Publishes an encoded event body on the server and returns its sequence number.
+    ///
+    /// The body need not decode as `C::Event`, so a test can play a server that is newer
+    /// than the client.
+    pub fn publish_body(&mut self, body: &[u8]) -> u64 {
+        let (head, frame) = server::publish(&mut self.log, body, &self.retention, self.now)
             .expect("publish succeeds");
         self.send_to_client(Message::Text(frame));
         head.seq

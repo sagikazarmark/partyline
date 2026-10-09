@@ -36,12 +36,39 @@ The struct name is the `class_name` in the wrangler configuration.
 
 ## Embed the hub by hand
 
-An object that owns its own state or routes embeds the hub as a field and delegates each handler.
-See the `Hub` documentation for the full form, and [`examples/orders`](https://github.com/sagikazarmark/partyline/tree/main/examples/orders) for an object that applies each event to its own table before it publishes.
+An object that owns its own state or routes embeds the hub as a field.
+`hub_handlers!` writes the `websocket_message`, `websocket_close`, `websocket_error`, and `alarm` handlers, so none is missed.
+`Hub::fetch_with` calls a closure with each event that `Publisher::publish` sends, before the hub stores and sends it, so the object applies the event to its own state in the same turn:
+
+```rust
+impl DurableObject for OrderChannel {
+    fn new(state: State, _env: Env) -> Self {
+        Self { hub: Hub::new(state, HubConfig::default()) }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.hub.fetch_with(req, |event| self.apply(event)).await
+    }
+
+    partyline_worker::hub_handlers!(hub);
+}
+```
+
+See [`examples/orders`](https://github.com/sagikazarmark/partyline/tree/main/examples/orders) for the full object.
+
+## Share the alarm
+
+A Durable Object has one alarm, and a Log-mode hub uses it for age-based trimming.
+An object that needs its own alarm uses `hub_websocket_handlers!` and writes `alarm` itself:
+
+- Schedule with `Hub::schedule_alarm(at_ms)`. It keeps the earlier of the current alarm and `at_ms`, and the hub schedules its trimming the same way.
+- In `alarm`, call `Hub::on_alarm` first, then do the object's own work only if it is due, then schedule its next time again. The alarm can fire early for either side.
+
+See `PollObject` in [`examples/poll`](https://github.com/sagikazarmark/partyline/tree/main/examples/poll).
 
 ## Use it from the Worker
 
-Route parameters usually arrive percent-encoded, because the client encodes the channel ID in the connect path. Decode the ID with `decode_segment` before you pass it to `Connect` or `Publisher`, so both name the same Durable Object. axum's `Path` extractor decodes for you.
+Route parameters usually arrive percent-encoded, because the client encodes the channel ID in the connect path. Decode the ID with `decode_segment` before you pass it to `Connect` or `Publisher`, so both name the same Durable Object. axum's `Path` extractor decodes for you, and `Connect::from_path` matches `/partyline/{channel}/{id}` and decodes the ID in one step.
 
 ```rust
 // Forward a client upgrade. Authorize first.
@@ -67,9 +94,12 @@ Publisher::<Orders>::new(&env, "ORDER_CHANNEL")?
 | --- | --- |
 | Retention, Log mode | 1,000 events or 24 hours, whichever is smaller |
 | Retention, Latest mode | 1 event |
-| Target event size | Under 16 KB. Send IDs and let the client fetch large payloads |
+| Largest event | 64 KiB, set with `HubConfig::max_event_bytes`. Aim for under 16 KB: send IDs and let the client fetch large payloads |
+| Largest replay | 8 MiB, set with `HubConfig::max_replay_bytes`. A client further behind gets `Reset` |
 
+`Connect::forward` removes the `token` query parameter before it forwards the upgrade, so tokens stay out of the Durable Object's request logs.
 One Durable Object accepts at most 32,768 WebSocket connections.
+A socket carries at most 10 tags of at most 256 characters each.
 
 ## License
 

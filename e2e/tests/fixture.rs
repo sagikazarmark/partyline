@@ -1,7 +1,7 @@
 //! Layer 4, against the e2e fixture Worker: upgrades through an axum router, trimming in
 //! SQLite by count and by age, authorization close codes, closing by tag, and channel reset.
 //!
-//! Run with `dagger check examples:end-to-end`, which starts the fixture under `wrangler dev`
+//! Run with `just e2e-fixture`, which starts the fixture under `wrangler dev`
 //! and sets `PARTYLINE_E2E_FIXTURE_URL`. Without it, every test passes without
 //! doing anything.
 
@@ -278,6 +278,76 @@ async fn the_real_client_receives_reset_after_a_channel_reset() {
     assert_eq!(handle.cursor(), Some(new_head));
     publish(&base, &id, 9).await;
     let event = next_event(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await;
-    assert_eq!(event, ClientEvent::Event { seq: 1, event: 9 });
+    assert_eq!(
+        event,
+        ClientEvent::Event {
+            epoch: new_head.epoch,
+            seq: 1,
+            event: 9
+        }
+    );
     handle.stop();
+}
+
+#[tokio::test]
+async fn events_over_the_size_limit_are_rejected() {
+    let Some(base) = base() else { return };
+    let id = unique("size");
+    // The fixture accepts events of at most 16 bytes.
+    let head = publish(&base, &id, 1_234_567_890_123_456).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/ticks/{}", encode_segment(&id)))
+        .body("12345678901234567")
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success(), "{}", response.status());
+    let text = get_text(&base, &format!("/api/ticks/{}/head", encode_segment(&id))).await;
+    assert_eq!(text.parse::<Cursor>().unwrap(), head, "nothing is stored");
+}
+
+async fn get_text(base: &str, path: &str) -> String {
+    reqwest::get(format!("{base}{path}"))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_token_is_stripped_but_the_cursor_is_kept() {
+    let Some(base) = base() else { return };
+    let id = unique("token");
+    let head = publish(&base, &id, 1).await;
+    publish(&base, &id, 2).await;
+    let mut ws = open_with(&base, &id, Some(Cursor::new(head.epoch, 1)), "&token=%FF").await;
+    hello(&mut ws).await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+}
+
+#[tokio::test]
+async fn non_ascii_tags_work_and_invalid_tags_are_refused() {
+    let Some(base) = base() else { return };
+    let id = unique("tags-utf8");
+    let user = "Usuário 日本";
+    let mut ws = open_with(&base, &id, None, &format!("&user={}", encode_segment(user))).await;
+    hello(&mut ws).await;
+    let closed = post(
+        &base,
+        &format!("/api/ticks/{id}/close?tag={}", encode_segment(user)),
+    )
+    .await;
+    assert_eq!(closed, "1");
+    assert_eq!(close_code(&mut ws).await, Some(close::FORBIDDEN));
+
+    // An empty tag would make the runtime throw, so `Connect` refuses to forward.
+    let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
+    let url = format!("{ws_base}{}?v=1&user=", connect_path("ticks", &id));
+    assert!(tokio_tungstenite::connect_async(url).await.is_err());
 }

@@ -151,8 +151,12 @@ impl Log for SqlLog {
             )?;
         }
         if let Some(cutoff) = policy.age_cutoff(now_ms) {
-            self.sql
-                .exec("DELETE FROM partyline_log WHERE ts < ?", vec![int(cutoff)?])?;
+            // Remove every event up to the newest expired one, not only the expired ones,
+            // so a clock that went backwards cannot leave a gap in the log.
+            self.sql.exec(
+                "DELETE FROM partyline_log WHERE seq <= (SELECT MAX(seq) FROM partyline_log WHERE ts < ?)",
+                vec![int(cutoff)?],
+            )?;
         }
         Ok(())
     }

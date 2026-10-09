@@ -2,10 +2,11 @@
 
 use std::marker::PhantomData;
 
+use partyline::frame::{InvalidId, encode_segment, match_connect_path};
 use partyline::{Channel, Cursor, codec};
 use worker::{Env, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
 
-use crate::hub::{TAGS_HEADER, is_upgrade};
+use crate::hub::{MAX_TAGS, TAGS_HEADER, check_tag, close_reason, is_upgrade};
 
 /// The base URL of internal requests to the hub. The host is never resolved.
 const INTERNAL: &str = "https://partyline.internal";
@@ -47,17 +48,49 @@ impl<C: Channel> Connect<C> {
         }
     }
 
+    /// Matches a request path against this channel's connect path,
+    /// `/partyline/{C::NAME}/{id}`, and targets the decoded ID.
+    ///
+    /// Returns `None` when the path is another route, and `Some(Err(_))` when the ID is not
+    /// valid percent-encoding. Use it in a Worker without a router; with a router, decode
+    /// the route parameter with [`crate::decode_segment`].
+    ///
+    /// ```ignore
+    /// match Connect::<Orders>::from_path(&req.path()) {
+    ///     Some(Ok(connect)) => connect.forward(&env, "ORDER_CHANNEL", req).await,
+    ///     Some(Err(_)) => reject(close::BAD_REQUEST, "invalid id"),
+    ///     None => other_routes(req, env).await,
+    /// }
+    /// ```
+    pub fn from_path(path: &str) -> Option<Result<Self, InvalidId>> {
+        match_connect_path(C::NAME, path).map(|id| id.map(Self::new))
+    }
+
     /// Adds a socket tag, such as the user ID. [`Publisher::close_tagged`] closes sockets by tag.
-    /// A socket carries at most 10 tags of at most 256 characters each.
+    ///
+    /// A socket carries at most 10 tags. Each must be non-empty and at most 256 characters.
+    /// [`Connect::forward`] fails if a tag breaks these rules.
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
     }
 
     /// Forwards the upgrade request and returns the Durable Object's `101` response.
+    ///
+    /// The `token` query parameter is removed first. The Worker has already checked it, and
+    /// it would otherwise show up in the Durable Object's request logs.
     pub async fn forward(self, env: &Env, binding: &str, req: Request) -> worker::Result<Response> {
         if !is_upgrade(&req) {
             return Response::error("Expected a WebSocket upgrade", 426);
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(worker::Error::RustError(format!(
+                "a socket carries at most {MAX_TAGS} tags, got {}",
+                self.tags.len()
+            )));
+        }
+        for tag in &self.tags {
+            check_tag(tag).map_err(worker::Error::RustError)?;
         }
         // Copy the headers, replacing any tags header the client sent.
         let headers = req.headers().clone();
@@ -65,11 +98,14 @@ impl<C: Channel> Connect<C> {
         if !self.tags.is_empty() {
             let tags = serde_json::to_string(&self.tags)
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
-            headers.set(TAGS_HEADER, &tags)?;
+            // Header values must be ASCII, and tags are often names.
+            headers.set(TAGS_HEADER, &encode_segment(&tags))?;
         }
+        let mut url = req.url()?;
+        strip_token(&mut url);
         let mut init = RequestInit::new();
         init.with_method(Method::Get).with_headers(headers);
-        let forwarded = Request::new_with_init(req.url()?.as_str(), &init)?;
+        let forwarded = Request::new_with_init(url.as_str(), &init)?;
         let namespace = env.durable_object(binding)?;
         stub(&namespace, &self.id)?
             .fetch_with_request(forwarded)
@@ -179,6 +215,26 @@ impl<C: Channel> Publisher<C> {
     }
 }
 
+/// Removes the `token` query parameter, keeping the others exactly as encoded.
+///
+/// Keys are compared decoded, the way `Url::query_pairs` reads them, so an encoded key such
+/// as `to%6Ben` is removed too.
+fn strip_token(url: &mut worker::Url) {
+    let Some(query) = url.query() else {
+        return;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            worker::url::form_urlencoded::parse(pair.as_bytes())
+                .next()
+                .is_none_or(|(key, _)| key != "token")
+        })
+        .collect();
+    let kept = kept.join("&");
+    url.set_query((!kept.is_empty()).then_some(kept.as_str()));
+}
+
 fn parse_cursor(text: &str) -> worker::Result<Cursor> {
     text.trim()
         .parse()
@@ -200,6 +256,35 @@ fn parse_cursor(text: &str) -> worker::Result<Cursor> {
 pub fn reject(code: u16, reason: &str) -> worker::Result<Response> {
     let pair = worker::WebSocketPair::new()?;
     pair.server.accept()?;
-    pair.server.close(Some(code), Some(reason))?;
+    pair.server.close(Some(code), Some(close_reason(reason)))?;
     Response::from_websocket(pair.client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_token_keeps_the_other_parameters() {
+        let strip = |s: &str| {
+            let mut url = worker::Url::parse(s).unwrap();
+            strip_token(&mut url);
+            url.to_string()
+        };
+        assert_eq!(
+            strip("https://a/partyline/c/1?v=1&token=secret&cursor=2.3"),
+            "https://a/partyline/c/1?v=1&cursor=2.3"
+        );
+        assert_eq!(
+            strip("https://a/partyline/c/1?token=x"),
+            "https://a/partyline/c/1"
+        );
+        assert_eq!(strip("https://a/p?v=1&x=a%20b"), "https://a/p?v=1&x=a%20b");
+        assert_eq!(
+            strip("https://a/p?v=1&to%6Ben=secret&t%6Fken=x&token"),
+            "https://a/p?v=1",
+            "encoded and empty keys are removed too"
+        );
+        assert_eq!(strip("https://a/p"), "https://a/p");
+    }
 }

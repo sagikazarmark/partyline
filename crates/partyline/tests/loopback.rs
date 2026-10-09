@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use partyline::server::Retention;
 use partyline::testing::{Faults, Loopback, Observed, check_latest_delivery, check_log_delivery};
-use partyline::{Channel, ClientConfig, Cursor, Mode, Status};
+use partyline::{Channel, ClientConfig, Cursor, Mode, Status, StopReason};
 use proptest::prelude::*;
 
 struct LogChan;
@@ -55,21 +55,26 @@ fn faults() -> impl Strategy<Value = Faults> {
         })
 }
 
-fn run<C: Channel<Event = u64>>(lb: &mut Loopback<C>, ops: &[Op]) -> u64 {
-    lb.start();
-    let mut published = 0;
+/// Applies `ops`. Event `n` has sequence number `n`, so `published` counts every event.
+fn apply<C: Channel<Event = u64>>(lb: &mut Loopback<C>, ops: &[Op], published: &mut u64) {
     for op in ops {
         match op {
             Op::Publish => {
-                published += 1;
-                let seq = lb.publish(&published);
-                assert_eq!(seq, published);
+                *published += 1;
+                let seq = lb.publish(published);
+                assert_eq!(seq, *published);
             }
             Op::Advance(ms) => lb.advance_ms(*ms),
             Op::Wake => lb.wake(),
             Op::Disconnect => lb.disconnect(),
         }
     }
+}
+
+fn run<C: Channel<Event = u64>>(lb: &mut Loopback<C>, ops: &[Op]) -> u64 {
+    lb.start();
+    let mut published = 0;
+    apply(lb, ops, &mut published);
     // A lost frame is noticed at the next event, as a gap. Publish one after healing so
     // every run ends with the client able to notice.
     lb.heal();
@@ -146,6 +151,98 @@ proptest! {
             prop_assert_eq!(lb.events().last().map(|(_, e)| *e), Some(published));
         }
     }
+
+    /// A server newer than the client publishes an event the client cannot decode. The app
+    /// sees every event before it, then the client stops for good and never loops.
+    #[test]
+    fn an_undecodable_event_stops_the_client_and_it_never_loops(
+        seed in any::<u64>(),
+        faults in faults(),
+        before in prop::collection::vec(op(), 0..100),
+        after in prop::collection::vec(op(), 0..100),
+    ) {
+        let mut lb = Loopback::<LogChan>::with_options(
+            seed, faults, Retention::LOG_DEFAULT, ClientConfig::default(), Some(Cursor::new(1, 0)),
+        );
+        lb.start();
+        let mut published = 0;
+        apply(&mut lb, &before, &mut published);
+        published += 1;
+        let bad = lb.publish_body(UNDECODABLE);
+        prop_assert_eq!(bad, published);
+        apply(&mut lb, &after, &mut published);
+        // As in `run`: a lost frame is noticed at the next event, so publish one after healing.
+        lb.heal();
+        lb.advance_ms(60_000);
+        published += 1;
+        lb.publish(&published);
+        lb.settle();
+
+        prop_assert_eq!(
+            lb.client().status(),
+            Status::Stopped { reason: StopReason::Incompatible { seq: bad } }
+        );
+        let last = check_log_delivery(0, lb.observed()).map_err(TestCaseError::fail)?;
+        prop_assert_eq!(last, bad - 1, "every event before the undecodable one");
+        prop_assert_eq!(lb.client().cursor(), Some(Cursor::new(1, bad - 1)));
+
+        let connects = lb.stats().connects;
+        lb.wake();
+        lb.disconnect();
+        lb.settle();
+        prop_assert_eq!(lb.stats().connects, connects, "no reconnect after the stop");
+    }
+}
+
+/// A Latest or Log event body that does not decode as `u64`: an event variant added later.
+const UNDECODABLE: &[u8] = br#"{"type":"added_later"}"#;
+
+#[test]
+fn an_undecodable_event_stops_the_client_once() {
+    let mut lb = Loopback::<LogChan>::new(5, Faults::NONE);
+    lb.start();
+    lb.advance_ms(100);
+    lb.publish(&1);
+    let bad = lb.publish_body(UNDECODABLE);
+    lb.publish(&3);
+    // A day of wakes would wake the Durable Object once per attempt if the client looped.
+    for _ in 0..100 {
+        lb.wake();
+        lb.advance(Duration::from_secs(60));
+    }
+    assert_eq!(lb.events(), vec![(1, 1)]);
+    assert_eq!(
+        lb.client().status(),
+        Status::Stopped {
+            reason: StopReason::Incompatible { seq: bad }
+        }
+    );
+    assert_eq!(lb.stats().connects, 1);
+    // An app restart (here, the same build) meets the same event and stops again.
+    lb.start();
+    lb.settle();
+    assert_eq!(lb.stats().connects, 2);
+    assert_eq!(
+        lb.client().status(),
+        Status::Stopped {
+            reason: StopReason::Incompatible { seq: bad }
+        }
+    );
+}
+
+#[test]
+fn an_undecodable_latest_value_stops_the_client() {
+    let mut lb = Loopback::<LatestChan>::new(5, Faults::NONE);
+    lb.publish_body(UNDECODABLE);
+    lb.start();
+    lb.settle();
+    assert_eq!(
+        lb.client().status(),
+        Status::Stopped {
+            reason: StopReason::Incompatible { seq: 1 }
+        }
+    );
+    assert_eq!(lb.stats().connects, 1);
 }
 
 #[test]
@@ -231,7 +328,7 @@ fn a_forbidden_close_stops_the_client() {
     assert_eq!(
         lb.client().status(),
         Status::Stopped {
-            code: Some(partyline::close::FORBIDDEN)
+            reason: StopReason::Closed(partyline::close::FORBIDDEN)
         }
     );
     assert_eq!(lb.stats().connects, 1);

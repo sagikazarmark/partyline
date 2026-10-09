@@ -11,7 +11,8 @@ use chat_shared::{AccessToken, Chat, ChatEvent, HISTORY, Login, PostMessage, ROO
 use dioxus::prelude::*;
 use partyline::close;
 use partyline_dioxus::{
-    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, TokenProvider, use_channel,
+    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, StopReason, TokenProvider,
+    use_channel,
 };
 
 /// Compiled by `dx` from `tailwind.css`.
@@ -234,7 +235,7 @@ fn Messages(user: String, expires_at: u64, since: Cursor) -> Element {
     use_effect(move || {
         if channel.status()
             == (Status::Stopped {
-                code: Some(close::FORBIDDEN),
+                reason: StopReason::Closed(close::FORBIDDEN),
             })
         {
             session.set(Session::SignedOut {
@@ -334,7 +335,7 @@ fn StatusBadge(status: Status, cursor: Option<Cursor>) -> Element {
             "bg-emerald-500 animate-pulse",
             "Live".to_owned(),
         ),
-        Status::Unauthorized { retry_in } => (
+        Status::Unauthorized { retry_in, .. } => (
             "bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
             "bg-rose-500",
             format!(
@@ -342,10 +343,17 @@ fn StatusBadge(status: Status, cursor: Option<Cursor>) -> Element {
                 retry_in.as_secs_f32()
             ),
         ),
-        Status::Waiting { retry_in } => (
+        Status::Waiting { retry_in, .. } => (
             "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
             "bg-amber-500",
             format!("Reconnecting in {:.1} s", retry_in.as_secs_f32()),
+        ),
+        Status::Stopped {
+            reason: StopReason::Incompatible { .. },
+        } => (
+            "bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
+            "bg-rose-500",
+            "New version: reload".to_owned(),
         ),
         Status::Stopped { .. } => (
             "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",

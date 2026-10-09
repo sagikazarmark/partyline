@@ -1,0 +1,59 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Recipes run from this directory. dx runs from the workspace root, because it fails inside a member.
+root := parent_directory(source_directory())
+
+export WRANGLER_SEND_METRICS := "false"
+
+[private]
+default:
+    @just --list examples
+
+# Build every example in parallel
+[parallel]
+build-all: (build "orders") (build "chat") (build "poll")
+
+# Build an example: its Worker and its web client
+build example: (worker example) (web example)
+
+# Build an example's Worker with worker-build
+worker example:
+    cd {{ example }}/worker && worker-build --release
+
+# Build an example's web client with dx and copy it to the Worker's assets
+web example:
+    cd {{ root }} && dx bundle --package {{ example }}-web --platform web --release --debug-symbols false
+    rm -rf {{ example }}/worker/public
+    cp -R {{ root }}/target/dx/{{ example }}-web/release/web/public {{ example }}/worker/public
+
+# Copy an example's local variables from .dev.vars.example, unless .dev.vars exists
+[private]
+dev-vars example:
+    if [[ -f {{ example }}/worker/.dev.vars.example && ! -f {{ example }}/worker/.dev.vars ]]; then cp {{ example }}/worker/.dev.vars.example {{ example }}/worker/.dev.vars; fi
+
+# Build and run an example locally with wrangler dev
+dev example port="8787": (build example) (dev-vars example)
+    cd {{ example }}/worker && exec wrangler dev --port {{ port }} --inspector-port $(({{ port }} + 1000))
+
+# Build and run every example locally, on ports 8787 (orders), 8788 (chat), and 8789 (poll)
+[parallel]
+dev-all: (dev "orders" "8787") (dev "chat" "8788") (dev "poll" "8789")
+
+# Run an example's end-to-end tests in e2e/tests against it under wrangler dev
+e2e example port="8790": (build example) (dev-vars example)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source {{ root }}/scripts/wrangler-dev.sh
+    serve {{ example }}/worker {{ port }}
+    cd {{ root }}
+    PARTYLINE_E2E_{{ uppercase(example) }}_URL=http://localhost:{{ port }} \
+        cargo test --locked -p partyline-e2e --test {{ example }} -- --test-threads=1
+
+# Build and deploy an example to Cloudflare Workers. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or log in with wrangler.
+deploy example: (build example)
+    cd {{ example }}/worker && wrangler deploy
+
+# Build and deploy every example to Cloudflare Workers
+[confirm("Deploy every example to Cloudflare Workers?")]
+[parallel]
+deploy-all: (deploy "orders") (deploy "chat") (deploy "poll")

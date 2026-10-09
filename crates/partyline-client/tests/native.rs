@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use partyline::frame::ConnectParams;
 use partyline::server::{self, Log, MemLog, Retention};
-use partyline::{Channel, ClientConfig, Cursor, Message, Mode, Status, close, codec};
+use partyline::{Channel, ClientConfig, Cursor, Message, Mode, Status, StopReason, close, codec};
 use partyline_client::{
     BaseUrl, ClientEvent, ConnectOptions, NativeSocket, TokenProvider, TokenRequest, Transport,
     TransportError,
@@ -188,9 +188,12 @@ impl TestServer {
     }
 
     fn publish(&self, n: u64) {
+        self.publish_body(&codec::encode_event(&n).unwrap());
+    }
+
+    fn publish_body(&self, body: &[u8]) {
         let mut log = self.log.lock().unwrap();
-        let body = codec::encode_event(&n).unwrap();
-        let (_, frame) = server::publish(&mut *log, &body, &Retention::LOG_DEFAULT, 0).unwrap();
+        let (_, frame) = server::publish(&mut *log, body, &Retention::LOG_DEFAULT, 0).unwrap();
         self.sockets
             .lock()
             .unwrap()
@@ -251,7 +254,7 @@ async fn driver_resumes_after_connection_loss() {
     }
     let mut seen = Vec::new();
     while seen.len() < 3 {
-        if let ClientEvent::Event { seq, event } = next_event(&mut events).await {
+        if let ClientEvent::Event { seq, event, .. } = next_event(&mut events).await {
             assert_eq!(seq, event);
             seen.push(seq);
         }
@@ -272,7 +275,9 @@ async fn driver_resumes_after_connection_loss() {
 
     handle.stop();
     wait_for(&mut events, |e| {
-        *e == ClientEvent::Status(Status::Stopped { code: None })
+        *e == ClientEvent::Status(Status::Stopped {
+            reason: StopReason::App,
+        })
     })
     .await;
     tokio::time::timeout(Duration::from_secs(5), driver)
@@ -291,7 +296,7 @@ async fn driver_stops_on_a_terminal_close_code() {
     server.close_all(close::FORBIDDEN);
     wait_for(&mut events, |e| {
         *e == ClientEvent::Status(Status::Stopped {
-            code: Some(close::FORBIDDEN),
+            reason: StopReason::Closed(close::FORBIDDEN),
         })
     })
     .await;
@@ -302,9 +307,46 @@ async fn driver_stops_on_a_terminal_close_code() {
     assert_eq!(
         handle.status(),
         Status::Stopped {
-            code: Some(close::FORBIDDEN)
+            reason: StopReason::Closed(close::FORBIDDEN),
         }
     );
+}
+
+#[tokio::test]
+async fn driver_stops_on_an_event_it_cannot_decode() {
+    let server = TestServer::start().await;
+    let (handle, mut events, driver) = partyline_client::connect::<Counter>(server.options());
+    let driver = tokio::spawn(driver);
+    wait_for(&mut events, |e| *e == ClientEvent::Status(Status::Open)).await;
+    server.publish(1);
+    server.publish_body(br#"{"type":"added_later"}"#);
+    let stopped = Status::Stopped {
+        reason: StopReason::Incompatible { seq: 2 },
+    };
+    wait_for(&mut events, |e| *e == ClientEvent::Status(stopped)).await;
+    tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the driver ends")
+        .unwrap();
+    assert_eq!(handle.status(), stopped);
+    assert_eq!(handle.cursor(), Some(Cursor::new(9, 1)));
+    assert_eq!(server.queries.lock().unwrap().len(), 1, "no reconnect");
+}
+
+#[tokio::test]
+async fn driver_stops_on_an_invalid_base_url() {
+    let (handle, mut events, driver) = partyline_client::connect::<Counter>(ConnectOptions::new(
+        BaseUrl::Explicit("ftp://example.com".into()),
+        "x",
+    ));
+    tokio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the driver ends");
+    let stopped = Status::Stopped {
+        reason: StopReason::InvalidUrl,
+    };
+    assert_eq!(events.next().await, Some(ClientEvent::Status(stopped)));
+    assert_eq!(handle.status(), stopped);
 }
 
 #[tokio::test]

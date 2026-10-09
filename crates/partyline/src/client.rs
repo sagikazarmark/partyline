@@ -106,6 +106,10 @@ pub enum Input {
     /// A timer requested earlier has fired.
     Timer(TimerId),
     /// The app became visible, or the network came back.
+    ///
+    /// It resets the attempt counter and connects at once while waiting. It replaces a
+    /// connect attempt in progress unless a wake started that attempt, and probes an open
+    /// socket with a ping. It does not restart a stopped client.
     Wake,
     /// Close the connection and stop.
     Stop,
@@ -156,19 +160,47 @@ pub enum Status {
     Waiting {
         /// The delay before the next connect.
         retry_in: Duration,
+        /// The number of the next connect attempt, counted from 1 since the last stable
+        /// connection or wake.
+        attempt: u32,
+        /// The close code of the connection that failed, or `None` when it failed without
+        /// one: a network error, a timeout, or a protocol error.
+        last_code: Option<u16>,
     },
     /// The server rejected the token (close code 4401). The driver asks the token provider
     /// for a fresh token before the next connect.
     Unauthorized {
         /// The delay before the next connect.
         retry_in: Duration,
+        /// The number of the next connect attempt, counted from 1 since the last stable
+        /// connection or wake.
+        attempt: u32,
     },
-    /// Stopped for good. `code` is the close code that stopped the client, or `None` when the
-    /// app stopped it.
+    /// Stopped for good. Only [`Input::Start`] restarts the client; a wake does not.
     Stopped {
-        /// The close code.
-        code: Option<u16>,
+        /// Why the client stopped.
+        reason: StopReason,
     },
+}
+
+/// Why the client stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StopReason {
+    /// The app stopped the client.
+    App,
+    /// The server closed the connection with a terminal close code, such as 4403. A `Hello`
+    /// with an unsupported protocol version stops the client with 4426.
+    Closed(u16),
+    /// The server sent an event this client cannot decode, so the app is older than the
+    /// server. Reload the app to get the new event type. Reconnecting would replay the
+    /// same event.
+    Incompatible {
+        /// The sequence number of the event.
+        seq: u64,
+    },
+    /// The base URL could not be resolved. The driver reports this before it connects.
+    InvalidUrl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +224,8 @@ pub struct Client<C: Channel> {
     phase: Phase,
     status: Status,
     attempt: u32,
+    /// The connect attempt in progress was started by a wake.
+    woken: bool,
     armed: [bool; TimerId::ALL.len()],
     ping_outstanding: bool,
     _channel: PhantomData<fn() -> C>,
@@ -227,6 +261,7 @@ impl<C: Channel> Client<C> {
             phase: Phase::Idle,
             status: Status::Idle,
             attempt: 0,
+            woken: false,
             armed: [false; TimerId::ALL.len()],
             ping_outstanding: false,
             _channel: PhantomData,
@@ -254,7 +289,7 @@ impl<C: Channel> Client<C> {
             Input::Start => {
                 if matches!(self.phase, Phase::Idle | Phase::Stopped) {
                     self.attempt = 0;
-                    self.connect(out);
+                    self.connect(false, out);
                 }
             }
             Input::Opened => {
@@ -265,10 +300,22 @@ impl<C: Channel> Client<C> {
             Input::Frame(message) => self.on_frame(message, out),
             Input::Closed { code } => self.on_closed(code, out),
             Input::Timer(id) => self.on_timer(id, out),
+            // Wakes come from the OS or the user, never from the server, so resetting the
+            // attempt counter here cannot cause a tight loop.
             Input::Wake => match self.phase {
                 Phase::Waiting => {
-                    self.disarm(TimerId::Reconnect);
-                    self.connect(out);
+                    self.attempt = 0;
+                    self.connect(true, out);
+                }
+                Phase::Connecting | Phase::Handshaking => {
+                    self.attempt = 0;
+                    // An attempt started before the wake likely started while offline, and
+                    // is doomed. One started by a wake is left alone, because wake sources
+                    // often fire together.
+                    if !self.woken {
+                        out.push(Output::Close);
+                        self.connect(true, out);
+                    }
                 }
                 Phase::Open => {
                     out.push(Output::Send(Message::ping()));
@@ -283,7 +330,7 @@ impl<C: Channel> Client<C> {
                     out.push(Output::Close);
                 }
                 if self.phase != Phase::Stopped {
-                    self.stop(None, out);
+                    self.stop(StopReason::App, out);
                 }
             }
         }
@@ -305,7 +352,9 @@ impl<C: Channel> Client<C> {
             }
             return;
         }
-        let frame = match codec::decode_frame::<C::Event>(&text) {
+        // The envelope and the event payload are decoded apart, so a malformed frame (a
+        // protocol error) is told from an event this build does not know (an outdated app).
+        let frame = match codec::decode_envelope(&text) {
             Ok(frame) => frame,
             // A frame type from a later protocol version: skip it.
             Err(_) if codec::is_unknown_frame(&text) => return,
@@ -315,7 +364,7 @@ impl<C: Channel> Client<C> {
             (Phase::Handshaking, ServerFrame::Hello { v, mode, head }) => {
                 if v != PROTOCOL_VERSION {
                     out.push(Output::Close);
-                    return self.stop(Some(close::UNSUPPORTED_VERSION), out);
+                    return self.stop(StopReason::Closed(close::UNSUPPORTED_VERSION), out);
                 }
                 self.mode = mode;
                 self.cursor = match (mode, self.cursor) {
@@ -338,7 +387,7 @@ impl<C: Channel> Client<C> {
                 self.set_status(Status::Open, out);
             }
             (Phase::Open, ServerFrame::Event { seq, event }) => {
-                let Some(cursor) = self.cursor.as_mut() else {
+                let Some(cursor) = self.cursor else {
                     return self.protocol_error(out);
                 };
                 if seq <= cursor.seq {
@@ -348,7 +397,13 @@ impl<C: Channel> Client<C> {
                     // A missed event. Reconnect and let the server replay the gap.
                     return self.protocol_error(out);
                 }
-                cursor.seq = seq;
+                let Ok(event) = codec::decode_payload::<C::Event>(&event) else {
+                    // The server knows an event type this build does not. A reconnect would
+                    // replay the same event, so stop until the app restarts.
+                    out.push(Output::Close);
+                    return self.stop(StopReason::Incompatible { seq }, out);
+                };
+                self.cursor = Some(Cursor::new(cursor.epoch, seq));
                 out.push(Output::Event { seq, event });
             }
             (Phase::Open, ServerFrame::Reset { head }) => {
@@ -364,9 +419,8 @@ impl<C: Channel> Client<C> {
             return;
         }
         match code {
-            Some(code) if close::is_terminal(code) => self.stop(Some(code), out),
-            Some(close::UNAUTHORIZED) => self.backoff(true, out),
-            _ => self.backoff(false, out),
+            Some(code) if close::is_terminal(code) => self.stop(StopReason::Closed(code), out),
+            _ => self.backoff(code, out),
         }
     }
 
@@ -376,10 +430,10 @@ impl<C: Channel> Client<C> {
         }
         self.armed[id.index()] = false;
         match (id, self.phase) {
-            (TimerId::Reconnect, Phase::Waiting) => self.connect(out),
+            (TimerId::Reconnect, Phase::Waiting) => self.connect(false, out),
             (TimerId::ConnectTimeout, Phase::Connecting | Phase::Handshaking) => {
                 out.push(Output::Close);
-                self.backoff(false, out);
+                self.backoff(None, out);
             }
             (TimerId::Stable, Phase::Open) => self.attempt = 0,
             (TimerId::HeartbeatSend, Phase::Open) => {
@@ -393,7 +447,7 @@ impl<C: Channel> Client<C> {
             }
             (TimerId::HeartbeatTimeout, Phase::Open) => {
                 out.push(Output::Close);
-                self.backoff(false, out);
+                self.backoff(None, out);
             }
             _ => {}
         }
@@ -406,9 +460,10 @@ impl<C: Channel> Client<C> {
         )
     }
 
-    fn connect(&mut self, out: &mut Vec<Output<C::Event>>) {
+    fn connect(&mut self, woken: bool, out: &mut Vec<Output<C::Event>>) {
         self.disarm_all();
         self.phase = Phase::Connecting;
+        self.woken = woken;
         self.ping_outstanding = false;
         out.push(Output::Connect {
             cursor: self.cursor,
@@ -419,19 +474,25 @@ impl<C: Channel> Client<C> {
 
     fn protocol_error(&mut self, out: &mut Vec<Output<C::Event>>) {
         out.push(Output::Close);
-        self.backoff(false, out);
+        self.backoff(None, out);
     }
 
-    fn backoff(&mut self, unauthorized: bool, out: &mut Vec<Output<C::Event>>) {
+    /// Waits before the next connect. `code` is the close code of the failed connection.
+    fn backoff(&mut self, code: Option<u16>, out: &mut Vec<Output<C::Event>>) {
         self.disarm_all();
         self.phase = Phase::Waiting;
         let retry_in = self.next_delay();
         self.attempt = self.attempt.saturating_add(1);
+        let attempt = self.attempt;
         self.arm(TimerId::Reconnect, retry_in, out);
-        let status = if unauthorized {
-            Status::Unauthorized { retry_in }
+        let status = if code == Some(close::UNAUTHORIZED) {
+            Status::Unauthorized { retry_in, attempt }
         } else {
-            Status::Waiting { retry_in }
+            Status::Waiting {
+                retry_in,
+                attempt,
+                last_code: code,
+            }
         };
         self.set_status(status, out);
     }
@@ -446,10 +507,10 @@ impl<C: Channel> Client<C> {
         Duration::from_secs_f64(ceiling * jitter)
     }
 
-    fn stop(&mut self, code: Option<u16>, out: &mut Vec<Output<C::Event>>) {
+    fn stop(&mut self, reason: StopReason, out: &mut Vec<Output<C::Event>>) {
         self.disarm_all();
         self.phase = Phase::Stopped;
-        self.set_status(Status::Stopped { code }, out);
+        self.set_status(Status::Stopped { reason }, out);
     }
 
     fn arm(&mut self, id: TimerId, after: Duration, out: &mut Vec<Output<C::Event>>) {
@@ -697,7 +758,7 @@ mod tests {
         assert_eq!(
             c.status(),
             Status::Stopped {
-                code: Some(close::UNSUPPORTED_VERSION)
+                reason: StopReason::Closed(close::UNSUPPORTED_VERSION)
             }
         );
     }
@@ -756,7 +817,9 @@ mod tests {
             let out = step(&mut c, Input::Closed { code: Some(code) });
             assert_eq!(
                 out,
-                vec![Output::Status(Status::Stopped { code: Some(code) })]
+                vec![Output::Status(Status::Stopped {
+                    reason: StopReason::Closed(code)
+                })]
             );
             assert!(
                 step(&mut c, Input::Wake).is_empty(),
@@ -890,7 +953,9 @@ mod tests {
             out,
             vec![
                 Output::Close,
-                Output::Status(Status::Stopped { code: None })
+                Output::Status(Status::Stopped {
+                    reason: StopReason::App
+                })
             ]
         );
         assert!(step(&mut c, Input::Stop).is_empty());
@@ -910,7 +975,12 @@ mod tests {
         step(&mut c, Input::Start);
         step(&mut c, Input::Closed { code: None });
         let out = step(&mut c, Input::Stop);
-        assert_eq!(out, vec![Output::Status(Status::Stopped { code: None })]);
+        assert_eq!(
+            out,
+            vec![Output::Status(Status::Stopped {
+                reason: StopReason::App
+            })]
+        );
     }
 
     #[test]
@@ -920,5 +990,192 @@ mod tests {
         assert!(step(&mut c, event(1, 1)).is_empty());
         assert!(step(&mut c, Input::Closed { code: None }).is_empty());
         assert!(step(&mut c, Input::Wake).is_empty());
+    }
+
+    /// An event of a variant this build does not know: `Ev` is a number.
+    fn new_variant(seq: u64) -> Input {
+        text(&format!(
+            r#"{{"t":"event","seq":{seq},"event":{{"type":"added_later"}}}}"#
+        ))
+    }
+
+    fn assert_incompatible<C: Channel<Event = Ev>>(
+        mode: &str,
+        since: Cursor,
+        head: &str,
+        seq: u64,
+    ) {
+        let mut c = client::<C>(Some(since));
+        open(&mut c, mode, head);
+        let out = step(&mut c, new_variant(seq));
+        assert_eq!(
+            out,
+            vec![
+                Output::Close,
+                Output::Status(Status::Stopped {
+                    reason: StopReason::Incompatible { seq }
+                })
+            ]
+        );
+        assert_eq!(c.cursor(), Some(since), "the event is not consumed");
+        assert!(
+            step(&mut c, Input::Wake).is_empty(),
+            "wake does not restart"
+        );
+        for id in TimerId::ALL {
+            assert!(step(&mut c, Input::Timer(id)).is_empty(), "{id:?}");
+        }
+        assert!(step(&mut c, Input::Closed { code: None }).is_empty());
+        // Only an app restart connects again, from the same cursor.
+        let out = step(&mut c, Input::Start);
+        assert_eq!(
+            out[0],
+            Output::Connect {
+                cursor: Some(since)
+            }
+        );
+    }
+
+    #[test]
+    fn an_undecodable_event_stops_instead_of_reconnecting() {
+        assert_incompatible::<LogChan>("log", Cursor::new(EPOCH, 3), "77.4", 4);
+    }
+
+    #[test]
+    fn an_undecodable_latest_value_stops_instead_of_reconnecting() {
+        assert_incompatible::<LatestChan>("latest", Cursor::new(EPOCH, 3), "77.9", 9);
+    }
+
+    #[test]
+    fn an_undecodable_event_is_checked_only_when_it_would_be_delivered() {
+        let mut c = client::<LogChan>(Some(Cursor::new(EPOCH, 3)));
+        open(&mut c, "log", "77.9");
+        assert!(
+            step(&mut c, new_variant(3)).is_empty(),
+            "a duplicate is dropped"
+        );
+        let out = step(&mut c, new_variant(6));
+        assert_eq!(out[0], Output::Close, "a gap is a protocol error first");
+        assert!(matches!(c.status(), Status::Waiting { .. }));
+        // An event frame without its payload is malformed, not incompatible.
+        let mut c = client::<LogChan>(Some(Cursor::new(EPOCH, 3)));
+        open(&mut c, "log", "77.9");
+        step(&mut c, text(r#"{"t":"event","seq":4}"#));
+        assert!(matches!(c.status(), Status::Waiting { .. }));
+    }
+
+    #[test]
+    fn waiting_reports_the_attempt_and_the_close_code() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        step(&mut c, Input::Closed { code: Some(1006) });
+        assert!(matches!(
+            c.status(),
+            Status::Waiting {
+                attempt: 1,
+                last_code: Some(1006),
+                ..
+            }
+        ));
+        step(&mut c, Input::Timer(TimerId::Reconnect));
+        step(&mut c, Input::Timer(TimerId::ConnectTimeout));
+        assert!(matches!(
+            c.status(),
+            Status::Waiting {
+                attempt: 2,
+                last_code: None,
+                ..
+            }
+        ));
+        step(&mut c, Input::Timer(TimerId::Reconnect));
+        step(&mut c, Input::Closed { code: Some(4401) });
+        assert!(matches!(
+            c.status(),
+            Status::Unauthorized { attempt: 3, .. }
+        ));
+    }
+
+    /// Fails `n` connect attempts in a row with the slowest jitter.
+    fn fail_attempts(c: &mut Client<LogChan>, n: usize) {
+        for _ in 0..n {
+            step(c, Input::Closed { code: Some(1006) });
+            step(c, Input::Timer(TimerId::Reconnect));
+        }
+    }
+
+    #[test]
+    fn wake_while_waiting_resets_the_attempt_counter() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        fail_attempts(&mut c, 8);
+        let out = step(&mut c, Input::Closed { code: Some(1006) });
+        assert_eq!(delays(&out)[0].1.as_millis(), 29999, "at the cap");
+        let out = step(&mut c, Input::Wake);
+        assert!(matches!(out[0], Output::Connect { .. }));
+        let out = step(&mut c, Input::Closed { code: Some(1006) });
+        assert_eq!(delays(&out)[0].1.as_millis(), 499, "back at the base");
+        assert!(matches!(c.status(), Status::Waiting { attempt: 1, .. }));
+    }
+
+    #[test]
+    fn wake_replaces_a_connect_attempt_not_started_by_a_wake() {
+        for opened in [false, true] {
+            let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+            step(&mut c, Input::Start);
+            fail_attempts(&mut c, 8);
+            if opened {
+                step(&mut c, Input::Opened);
+            }
+            let out = step(&mut c, Input::Wake);
+            assert_eq!(
+                out,
+                vec![
+                    Output::Close,
+                    Output::Connect { cursor: None },
+                    Output::SetTimer {
+                        id: TimerId::ConnectTimeout,
+                        after: Duration::from_secs(10)
+                    },
+                ],
+                "opened: {opened}"
+            );
+            let out = step(&mut c, Input::Closed { code: Some(1006) });
+            assert_eq!(delays(&out)[0].1.as_millis(), 499, "the counter reset");
+        }
+    }
+
+    #[test]
+    fn wake_leaves_a_connect_attempt_started_by_a_wake_alone() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        step(&mut c, Input::Closed { code: None });
+        assert!(matches!(
+            step(&mut c, Input::Wake)[0],
+            Output::Connect { .. }
+        ));
+        // `visibilitychange` and `online` often fire together.
+        assert!(step(&mut c, Input::Wake).is_empty());
+        step(&mut c, Input::Opened);
+        assert!(step(&mut c, Input::Wake).is_empty());
+        step(&mut c, hello("log", "1.1"));
+        assert_eq!(c.status(), Status::Open);
+    }
+
+    #[test]
+    fn a_wake_reset_still_needs_a_stable_connection_for_server_closes() {
+        let mut c = Client::<LogChan>::new(ClientConfig::default(), None, || 0.999_999);
+        step(&mut c, Input::Start);
+        step(&mut c, Input::Closed { code: None });
+        step(&mut c, Input::Wake);
+        // The server accepts and closes at once, again and again: the backoff still grows.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            step(&mut c, Input::Opened);
+            step(&mut c, hello("log", "1.0"));
+            let out = step(&mut c, Input::Closed { code: Some(1011) });
+            seen.push(delays(&out)[0].1.as_millis());
+            step(&mut c, Input::Timer(TimerId::Reconnect));
+        }
+        assert_eq!(seen, vec![499, 999, 1999]);
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "orders-tail"
+version = "0.0.0"
+description = "Print an order's events and connection status from the command line"
+edition.workspace = true
+publish = false
+license.workspace = true
+
+# Native only: on wasm32 the binary is an empty stub, so `cargo check --workspace --target
+# wasm32-unknown-unknown` still passes.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures.workspace = true
+orders-shared = { path = "../shared" }
+partyline.workspace = true
+partyline-client.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal"] }

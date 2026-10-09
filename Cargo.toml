@@ -11,6 +11,7 @@ members = [
     "examples/orders/shared",
     "examples/orders/worker",
     "examples/orders/web",
+    "examples/orders/tail",
     "examples/poll/shared",
     "examples/poll/worker",
     "examples/poll/web",
@@ -60,10 +61,13 @@ worker = "0.8.7"
 proptest = "1.11"
 wasm-bindgen-test = "0.3"
 
+# cargo-release: bumps the shared version, commits, tags, publishes to crates.io, and pushes.
 [workspace.metadata.release]
+allow-branch = ["main"]
 sign-commit = true
 sign-tag = true
 shared-version = true
+consolidate-commits = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
 

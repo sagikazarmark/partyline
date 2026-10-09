@@ -40,12 +40,18 @@ A vote travels over HTTP: the phone sends `POST /api/polls/{id}/vote`, `PollObje
 
 - A rate limit on the vote route: 20 votes per client IP per 10 seconds.
 - A small retention window: 200 activity events.
-- A daily reset at midnight UTC, from `PollObject`'s alarm.
+- A daily reset at midnight UTC, from `PollObject`'s alarm. The object shares the alarm with its hub: see [how to share the alarm](../../docs/how-to/share-the-alarm.md).
 - A custom subdomain, so zone-level rate limiting and firewall rules apply.
 
 ## Run it
 
-Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
+In `devenv shell`, one command builds and runs everything:
+
+```shell
+just examples dev poll
+```
+
+Or by hand. Requirements: the Dioxus CLI (`dx`), `worker-build` (`cargo install worker-build`), and Node.js.
 
 ```shell
 # From the workspace root. `dx` fails inside a member directory.
@@ -53,12 +59,62 @@ dx bundle --package poll-web --platform web --release
 mkdir -p examples/poll/worker/public
 cp -r target/dx/poll-web/release/web/public/. examples/poll/worker/public/
 cd examples/poll/worker
+worker-build --release
 npx wrangler dev
 ```
 
 Restart `wrangler dev` after each web build: it does not pick up new assets while it runs.
 
-Open <http://localhost:8787/present> and <http://localhost:8787/>. See [Releasing](../../docs/how-to/release.md#deploy-the-demo) to deploy it.
+Open <http://localhost:8787/present> and <http://localhost:8787/>. See [Deploy the demo](#deploy-the-demo) to deploy it.
+
+## Deploy the demo
+
+This example is the public demo. Deploy it after a release, so it runs the released code.
+
+### What it uses
+
+Taken from [`examples/poll/worker/wrangler.toml`](worker/wrangler.toml):
+
+| Resource | Configuration | Setup needed |
+| --- | --- | --- |
+| Durable Objects | `PollObject` and `ActivityChannel`, both in `new_sqlite_classes` of migration `v1` | None. `wrangler deploy` applies the migration |
+| Rate limiting | `VOTE_LIMITER`: 20 votes per client IP per 10 seconds | None. The binding is created on deploy |
+| Static assets | The web client in `./public` | Build it first, below |
+| Custom domain | Commented out in `routes` | Set your domain, below |
+
+The demo needs no secrets, no KV namespace, and no D1 database.
+
+### Steps
+
+1. Set the domain. In `examples/poll/worker/wrangler.toml`, uncomment the `routes` line and set your subdomain. The zone must be in the Cloudflare account you deploy to. Do not commit your domain if the repository is public and the domain is private.
+
+   ```toml
+   routes = [{ pattern = "partyline.example.com", custom_domain = true }]
+   ```
+
+2. Build and deploy, in `devenv shell` from the workspace root:
+
+   ```shell
+   just examples deploy poll
+   ```
+
+   Wrangler uses your `wrangler login` session, or `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment. The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: Workers Routes: Edit" on the zone for the custom domain. Cloudflare creates the DNS record itself.
+
+   Or by hand, from the workspace root:
+
+   ```shell
+   dx bundle --package poll-web --platform web --release
+   mkdir -p examples/poll/worker/public
+   cp -r target/dx/poll-web/release/web/public/. examples/poll/worker/public/
+   cd examples/poll/worker
+   worker-build --release
+   npx wrangler deploy
+   ```
+
+3. Open `/present` on the domain and vote from a phone.
+4. After a deploy that changes the hub, run the [manual hibernation check](../../docs/testing.md#manual-hibernation-check) and the [phone matrix](../../docs/testing.md#layer-5-phone-matrix).
+
+The demo resets itself every day at midnight UTC, from `PollObject`'s alarm. Press "Reset demo" in the presenter view to reset it at once.
 
 ## Styles
 

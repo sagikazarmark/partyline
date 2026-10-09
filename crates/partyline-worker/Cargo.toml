@@ -14,6 +14,7 @@ categories.workspace = true
 http = ["worker/http", "dep:http", "dep:http-body", "dep:bytes"]
 
 [dependencies]
+futures.workspace = true
 partyline.workspace = true
 serde_json.workspace = true
 worker.workspace = true

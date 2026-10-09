@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8d7ae048b2e7cb7ad139ed9c7253e32c213777d4125c669d96da1ce011847bc9 # shrinks to seed = 16349254664051985039, faults = Faults { drop: 0.1963489156562063, lose: 0.03601296401901261, duplicate: 0.09346168954677711, max_delay: 309ms, connect_fail: 0.27691437735880076 }, before = [Advance(703), Publish, Publish, Publish, Publish, Publish, Wake, Publish, Advance(2171), Publish, Advance(2624), Publish, Advance(2828), Advance(2440), Advance(2552), Publish, Advance(1582), Publish, Publish, Publish, Publish, Publish, Publish, Publish, Publish, Publish, Publish], after = [Wake, Advance(720)]

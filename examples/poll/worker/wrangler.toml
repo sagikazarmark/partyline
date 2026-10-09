@@ -6,8 +6,8 @@ compatibility_date = "2026-09-01"
 # firewall rules apply. Uncomment and set the domain to deploy.
 # routes = [{ pattern = "partyline.example.com", custom_domain = true }]
 
-[build]
-command = "worker-build --release"
+# [build]
+# command = "worker-build --release"
 
 [[durable_objects.bindings]]
 name = "POLL_OBJECT"

@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 use partyline::frame::encode_segment;
 use partyline_dioxus::{
-    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, use_channel,
+    ChannelMessage, ChannelOptions, Cursor, PartylineProvider, Status, StopReason, use_channel,
 };
 use poll_shared::{ActivityEvent, PollActivity, PollSnapshot, PollTally, Tally, Vote};
 
@@ -88,10 +88,10 @@ fn use_poll(id: &str) -> PollState {
     }
 }
 
-/// Subscribes to both channels and writes into the parent's state. Unmounting it is how the
-/// phone goes offline: the cursor stays in the parent, and mounting it again resumes.
+/// Subscribes to both channels and writes into the parent's state. Disabling it is how the
+/// phone goes offline: the hooks keep the cursor, and enabling them again resumes.
 #[component]
-fn Live(id: String, since: Option<Cursor>, state: PollState) -> Element {
+fn Live(id: String, since: Option<Cursor>, enabled: bool, state: PollState) -> Element {
     let PollState {
         snapshot: _,
         mut tally,
@@ -100,14 +100,19 @@ fn Live(id: String, since: Option<Cursor>, state: PollState) -> Element {
         mut cursor,
     } = state;
 
-    use_channel::<PollTally>(ChannelOptions::new(id.clone()), move |message| {
-        if let ChannelMessage::Event(t) = message {
-            tally.set(t);
-        }
-    });
+    use_channel::<PollTally>(
+        ChannelOptions::new(id.clone()).enabled(enabled),
+        move |message| {
+            if let ChannelMessage::Event(t) = message {
+                tally.set(t);
+            }
+        },
+    );
 
     let activity = use_channel::<PollActivity>(
-        ChannelOptions::new(id.clone()).since(since),
+        ChannelOptions::new(id.clone())
+            .since(since)
+            .enabled(enabled),
         move |message| match message {
             ChannelMessage::Event(ActivityEvent::PollReset) => {
                 feed.set(vec![ActivityEvent::PollReset.describe()])
@@ -182,10 +187,17 @@ fn StatusBadge(state: PollState) -> Element {
             "bg-emerald-500 animate-pulse",
             "Live".to_owned(),
         ),
-        Status::Waiting { retry_in } | Status::Unauthorized { retry_in } => (
+        Status::Waiting { retry_in, .. } | Status::Unauthorized { retry_in, .. } => (
             "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
             "bg-amber-500",
             format!("Reconnecting in {:.1} s", retry_in.as_secs_f32()),
+        ),
+        Status::Stopped {
+            reason: StopReason::Incompatible { .. },
+        } => (
+            "bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
+            "bg-rose-500",
+            "New version: reload".to_owned(),
         ),
         Status::Stopped { .. } => (
             "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
@@ -271,7 +283,7 @@ fn Presenter(id: String, join_url: String) -> Element {
     };
     rsx! {
         main { class: "mx-auto grid max-w-6xl gap-8 p-6 lg:grid-cols-[1fr_18rem] lg:p-12",
-            Live { id: id.clone(), since: Some(snap.activity_head), state }
+            Live { id: id.clone(), since: Some(snap.activity_head), enabled: true, state }
             div { class: "space-y-8",
                 header { class: "space-y-4",
                     p { class: "text-sm font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-400",
@@ -313,8 +325,6 @@ fn Phone(id: String) -> Element {
     let state = use_poll(&id);
     let name = use_hook(guest_name);
     let mut online = use_signal(|| true);
-    // The activity cursor when the phone went offline.
-    let mut offline_at = use_signal(|| None::<Cursor>);
     let mut replayed = use_signal(|| None::<u64>);
     let mut my_vote = use_signal(|| None::<usize>);
 
@@ -322,27 +332,20 @@ fn Phone(id: String) -> Element {
     let Some(Ok(snap)) = &*snapshot else {
         return rsx! { Loading {} };
     };
-    let since = if online() {
-        offline_at().or(Some(snap.activity_head))
-    } else {
-        None
-    };
 
     let toggle = {
         let id = id.clone();
         move |_| {
             if online() {
-                // Unmounting `Live` stops its drivers. Keep the cursor to resume from.
-                offline_at.set((state.cursor)());
+                // Disabling stops the drivers. The hooks keep the cursor to resume from.
                 replayed.set(None);
                 online.set(false);
-                let mut status = state.status;
-                status.set(Status::Stopped { code: None });
             } else {
                 // The replay count is the difference between the head now and the cursor.
                 let id = id.clone();
                 spawn(async move {
-                    if let (Ok(snap), Some(at)) = (fetch_poll(&id).await, offline_at())
+                    let at = *state.cursor.peek();
+                    if let (Ok(snap), Some(at)) = (fetch_poll(&id).await, at)
                         && snap.activity_head.epoch == at.epoch
                     {
                         replayed.set(Some(snap.activity_head.seq.saturating_sub(at.seq)));
@@ -355,9 +358,7 @@ fn Phone(id: String) -> Element {
 
     rsx! {
         main { class: "mx-auto max-w-md space-y-5 p-4 pb-10",
-            if online() {
-                Live { key: "{offline_at():?}", id: id.clone(), since, state }
-            }
+            Live { id: id.clone(), since: Some(snap.activity_head), enabled: online(), state }
             header { class: "flex items-center justify-between gap-3 pt-2",
                 StatusBadge { state }
                 label { class: "inline-flex shrink-0 cursor-pointer items-center gap-2 text-sm font-medium",

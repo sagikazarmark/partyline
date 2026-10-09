@@ -8,7 +8,7 @@ The [chat example](../../examples/chat) runs the same flow with a stand-in sign-
 
 1. Before every connect, the client calls its token provider. The provider calls Clerk's `getToken()`.
 2. The client sends the token in the `token` query parameter. Browsers cannot set headers on a WebSocket.
-3. The Worker verifies the token in the route handler, then calls `Connect::forward` with the user ID as a tag.
+3. The Worker verifies the token in the route handler, then calls `Connect::forward` with the user ID as a tag. `Connect::forward` removes the `token` parameter before the request reaches the Durable Object, so tokens stay out of its logs.
 4. On sign-out, the Worker closes that user's sockets by tag with 4403, so the client does not reconnect.
 
 The Clerk session token is short-lived, so it does the job of a one-time ticket.
@@ -33,6 +33,8 @@ rsx! {
     }
 }
 ```
+
+A new token provider, for example after the user switches accounts, takes effect at the next connect. The hooks do not restart for it. To use it at once, call `reconnect()` on the handle the hook returns.
 
 The browser also sends the session cookie with the upgrade, because the socket is same-origin.
 After time in the background that cookie can be stale, which is why apps with auth set a provider.

@@ -42,8 +42,26 @@ On web the base URL defaults to the page origin, so most apps configure nothing.
 
 - **Start.** The driver starts from an effect. Effects do not run during server-side rendering.
 - **Stop.** On unmount the hook closes the socket with 1000.
-- **Change.** When the channel ID changes, the hook stops the old driver and starts a new one.
-- **Wake.** On wasm, the client listens for `visibilitychange` and `online`.
+- **Change.** When the channel ID changes, the hook stops the old driver and starts a new one from the new `since`. When the effective base URL or client config changes, or after `reconnect()`, it starts a new one from the current cursor. A new handler or token provider does not restart the driver: the latest one is called.
+- **Disable.** `ChannelOptions::enabled(false)` stops the driver, keeps the cursor, and sets the status to `Stopped { reason: StopReason::App }`. Enabling again resumes from the cursor.
+- **Wake.** On wasm, the client wakes on `visibilitychange`, `online`, `pageshow` from the back-forward cache, `resume`, and network changes.
+
+A client that receives an event it cannot decode stops with `Stopped { reason: StopReason::Incompatible { .. } }` instead of reconnecting. The app is older than the server: ask the user to reload.
+
+## Reducer
+
+`use_channel_reducer` folds events into state, and refetches the state after a reset:
+
+```rust
+let (order, channel) = use_channel_reducer::<Orders, Order, _, _, _>(
+    ChannelOptions::new(id.clone()).since(head),
+    move || initial.clone(),                      // the state at `since`, again after an ID change
+    |order, event| order.apply(&event),
+    move || fetch_order(id.clone()),               // Result<(Order, Cursor), impl Display>
+);
+```
+
+Events that arrive during a refetch are buffered and applied to the fresh state when they are newer than its head. A failed refetch is logged with `tracing` and retried after 1 s, doubling up to 30 s. A change of channel ID resets the state with `initial` and discards a refetch in flight.
 
 Two components that subscribe to the same channel open two sockets in 0.1.
 

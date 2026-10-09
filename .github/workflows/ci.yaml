@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Cache the Cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: check
+
+      - name: Check
+        run: devenv shell -- just check
+
+      - name: Check links
+        run: devenv shell -- just links
+
+  examples:
+    name: Example (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: orders
+            e2e: true
+            browser: true
+          - example: chat
+            e2e: true
+          - example: poll
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Cache the Cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: examples-${{ matrix.example }}
+
+      # The end-to-end tests build the example first.
+      - name: Build the example
+        if: ${{ !matrix.e2e }}
+        run: devenv shell -- just examples build ${{ matrix.example }}
+
+      - name: Build the example and run its end-to-end tests
+        if: ${{ matrix.e2e }}
+        run: devenv shell -- just examples e2e ${{ matrix.example }}
+
+      # The runner image ships Chrome and a matching chromedriver.
+      - name: Browser tests
+        if: ${{ matrix.browser }}
+        run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" devenv shell -- just browser
+
+  e2e-fixture:
+    name: End-to-end tests (fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Cache the Cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: e2e-fixture
+
+      - name: End-to-end tests
+        run: devenv shell -- just e2e-fixture

@@ -56,7 +56,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use futures::channel::mpsc;
 
-pub use partyline::{self, Channel, ClientConfig, Cursor, Status};
+pub use partyline::{self, Channel, ClientConfig, Cursor, Status, StopReason};
 pub use transport::{DefaultTransport, Transport, TransportError};
 
 #[cfg(target_arch = "wasm32")]
@@ -225,6 +225,9 @@ impl ConnectOptions {
 pub enum ClientEvent<E> {
     /// An event, delivered once and in order.
     Event {
+        /// The epoch of the log the event belongs to. It changes when the server wipes its
+        /// log.
+        epoch: u64,
         /// The sequence number.
         seq: u64,
         /// The event.
@@ -272,7 +275,9 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Connects now if waiting to reconnect, or probes an open socket with a ping.
+    /// Connects now if waiting to reconnect, restarts a connect attempt that may have
+    /// started while offline, or probes an open socket with a ping. It also resets the
+    /// reconnect backoff.
     pub fn wake(&self) {
         let _ = self.commands.unbounded_send(Command::Wake);
     }
@@ -315,8 +320,9 @@ impl<E> Stream for Events<E> {
 /// Connects to channel `C` with the default transport for the target.
 ///
 /// Returns a control handle, the event stream, and the driver future. Nothing happens until
-/// the driver runs. The driver ends after [`Handle::stop`], after a terminal close code,
-/// or when every handle is dropped.
+/// the driver runs. The driver ends with [`Status::Stopped`]: after [`Handle::stop`], after a
+/// terminal close code, after an event it cannot decode, or when every handle is dropped.
+/// Connect again to restart it.
 pub fn connect<C: Channel>(
     options: ConnectOptions,
 ) -> (Handle, Events<C::Event>, impl Future<Output = ()>) {

@@ -1,7 +1,7 @@
 //! Layer 4: the Durable Object, the SQLite log, and the Worker helpers in workerd.
 //!
-//! Run with `dagger check examples:end-to-end`, which starts the orders example under
-//! `wrangler dev` and sets `PARTYLINE_E2E_URL`. Without it, every test passes without
+//! Run with `just examples e2e orders`, which starts the orders example under
+//! `wrangler dev` and sets `PARTYLINE_E2E_ORDERS_URL`. Without it, every test passes without
 //! doing anything.
 
 use std::time::Duration;
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn base() -> Option<String> {
-    std::env::var("PARTYLINE_E2E_URL").ok()
+    std::env::var("PARTYLINE_E2E_ORDERS_URL").ok()
 }
 
 fn unique(prefix: &str) -> String {
@@ -275,7 +275,7 @@ async fn the_real_client_goes_offline_and_resumes() {
     let (handle, mut events) = client(&base, &id, cursor);
     let mut seen = Vec::new();
     while seen.len() < 3 {
-        if let ClientEvent::Event { seq, event } =
+        if let ClientEvent::Event { seq, event, .. } =
             wait_for(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await
         {
             seen.push((seq, event));
@@ -322,9 +322,11 @@ async fn ids_with_reserved_characters_reach_one_durable_object() {
     wait_for(&mut events, |e| *e == ClientEvent::Status(Status::Open)).await;
     publish(&base, &id, &note(2)).await;
     let event = wait_for(&mut events, |e| matches!(e, ClientEvent::Event { .. })).await;
+    let head = snapshot(&base, &id).await.head;
     assert_eq!(
         event,
         ClientEvent::Event {
+            epoch: head.epoch,
             seq: 2,
             event: note(2)
         }

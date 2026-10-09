@@ -14,22 +14,53 @@ The Dioxus hooks are tested in a real `VirtualDom` against a local server in `cr
 
 ## Run the tests
 
-```shell
-# Layers 1-3 (native) and the hook tests
-cargo test
+The tests run with [just](https://just.systems), in `devenv shell`, which provides every tool. CI runs the same recipes.
 
-# Layer 3 (browser), in headless Chromium against the orders example under wrangler dev
-dagger check examples:browser
+```shell
+# Layers 1-3 (native) and the hook tests, with formatting, lints, and docs
+just check
+
+# Layer 3 (browser), in headless Chrome against the orders example under wrangler dev
+just browser
 
 # Layer 4, against the orders and chat examples and the e2e fixture under wrangler dev
-dagger check examples:end-to-end
+just e2e
+
+# Layer 4, against one of them
+just examples e2e orders
+just examples e2e chat
+just e2e-fixture
 ```
 
-Both run in containers with Dagger, so they need only Docker and the Dagger CLI.
-`dagger check examples` also builds every example.
+`just browser` needs Chrome and a matching `chromedriver`. Set `CHROMEDRIVER` to the driver's path if it is not on the `PATH`.
+`just e2e` and `just browser` build the examples they need first, and run `wrangler dev` on ports 8790 to 8792. `just examples e2e` takes the port as a second argument and defaults to 8790.
+They start `wrangler dev` with [`scripts/wrangler-dev.sh`](../scripts/wrangler-dev.sh), which waits until the Worker answers and stops it when the tests end.
 
-Run an example locally with `dagger call examples orders service up --ports 8787:8787`.
-Deploy one with `dagger call examples poll deploy --account-id <id> --api-token env://CLOUDFLARE_API_TOKEN`.
+### In CI
+
+[CI](../.github/workflows/ci.yaml) runs the same recipes in parallel jobs:
+
+- One job runs `just check` and `just links`.
+- Each example builds in its own job. The orders and chat jobs also run `just examples e2e`, and the orders job runs `just browser`.
+- One job runs `just e2e-fixture`.
+
+CI also runs these checks:
+
+| Check | What it proves |
+| --- | --- |
+| `just examples build <example>` | Every example builds |
+| `just links` | Every relative link and anchor in the Markdown files resolves. Links to other sites are not checked. It uses [lychee](https://lychee.cli.rs) |
+
+CI does not check the minimum supported Rust version. To check that the four published crates build on Rust 1.91, natively and for wasm32, run:
+
+```shell
+devenv --option languages.rust.version:string 1.91.0 shell -- just msrv
+```
+
+`just --list --list-submodules` lists every recipe.
+
+Run an example locally with `just examples dev orders`. See [Run the examples locally](how-to/run-examples-locally.md).
+Deploy one with `just examples deploy poll`.
 
 ## Layer 2 carries the main guarantee
 
@@ -44,7 +75,7 @@ The server side of the harness calls the same `server::handshake` and `server::p
 
 Layer 4 cannot force hibernation locally. The hub is safe by construction, because it holds no state in memory. Confirm it once on a deployed Worker:
 
-1. Deploy the demo.
+1. [Deploy the demo](../examples/poll/README.md#deploy-the-demo).
 2. Open the phone view on one device. Wait until the badge shows "Live".
 3. Leave the socket idle for at least 5 minutes. The Durable Object hibernates after about 10 seconds without events.
 4. Vote from another device.

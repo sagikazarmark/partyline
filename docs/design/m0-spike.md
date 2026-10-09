@@ -14,8 +14,8 @@ Instead of a throwaway Worker, the questions were answered against `worker` 0.8.
 | ... including through an axum router on Workers | Yes, with `Connect::forward_http` (feature `http`). The WebSocket survives the `http` conversions in the response extensions | The e2e fixture routes through axum: `e2e/tests/fixture.rs` |
 | Frames sent on the server socket before the 101 response arrive first | Yes | Every end-to-end test reads `Hello` and the replay first |
 | `#[durable_object]` expands correctly when a `macro_rules!` macro in another crate emits it | Yes, once `wasm_bindgen` is in scope (see below) | The demo's `ActivityChannel` and the e2e fixture's `TickChannel` are built with `channel_object!` and run under `wrangler dev` |
-| Publish the `0.0.0` placeholders | **Open.** Needs the crate owner's crates.io token | See [Releasing](how-to/release.md) |
-| A phone receives a broadcast after the Durable Object has hibernated | **Open.** Hibernation cannot be forced locally | The manual check in [Testing](testing.md#manual-hibernation-check) |
+| Publish the `0.0.0` placeholders | **Open.** Needs the crate owner's crates.io token | Publish with `cargo release` from the owner's machine |
+| A phone receives a broadcast after the Durable Object has hibernated | **Open.** Hibernation cannot be forced locally | The manual check in [Testing](../testing.md#manual-hibernation-check) |
 
 ## Awkward `worker` APIs and how partyline handles them
 
@@ -47,6 +47,12 @@ The implementation follows the plan, with these changes. Each one came from a pr
 | Client `rng` | `impl FnMut() -> f64 + 'static` | Also `Send` | The native driver future is `Send`, so it can run on a multi-threaded tokio runtime |
 | Layout | The demo lives in `demo/` | `examples/poll`, next to `examples/orders` | Every runnable app lives in `examples/`. The poll is still the public demo |
 | Test hooks | Not specified | Test-only behavior (magic tokens, close-by-tag and reset routes) lives in the `e2e/fixture` Worker, not in the examples | Keeps `examples/orders` minimal and keeps those routes off public deployments |
+| Versioning | Each crate versioned and released on its own | One shared workspace version and one `v{version}` tag. 0.1.0 was tagged per crate; 0.2.0 is the first shared release | The crates move in lockstep because they share the wire protocol. One tag is simpler to release, and users match one version across all four crates |
+| Replay limit | No replay cap: retention bounds the replay | Retention, plus a byte budget: `HubConfig::max_replay_bytes`, 8 MiB by default. A longer replay, or a retained range with a hole, gets `Reset` | A Durable Object has 128 MB of memory, and a replay is built in one turn. A `Reset` and a refetch are always correct |
+| Event size | A target of 16 KB, not enforced | `HubConfig::max_event_bytes`, 64 KiB by default. A larger publish fails with HTTP 413 | A large event is a bug in the app. Failing the publish shows it at once |
+| Handler delegation | Write each handler, or generate the whole object | Also `hub_handlers!` and `hub_websocket_handlers!` inside a hand-written `impl DurableObject`, and `Hub::fetch_with` to apply each published event in the object | Objects with their own state repeated the same four handlers and matched the hub's internal `/publish` route by hand |
+| Alarm | The hub owns the alarm | `Hub::schedule_alarm` keeps the earlier of two alarm times, so an object and its hub share the one alarm | A Durable Object has one alarm. The demo needs a daily reset next to the hub's trimming |
+| Stopped status | `Stopped { code }` | `Stopped { reason: StopReason }`, with `Incompatible` for an event the client cannot decode | An undecodable event means a newer Worker. Reconnecting cannot fix it, so the client stops and the app prompts a reload |
 
 ## Tooling notes
 
