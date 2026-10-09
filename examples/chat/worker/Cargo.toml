@@ -9,11 +9,11 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 chat-shared = { path = "../shared" }
-hmac = "0.12"
+hmac = "0.13"
 partyline-worker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 worker.workspace = true
