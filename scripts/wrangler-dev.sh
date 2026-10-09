@@ -11,7 +11,7 @@ serve() {
     trap "kill $pid 2>/dev/null || true; wait 2>/dev/null || true" EXIT
 
     for ((i = 0; i < 120; i++)); do
-        if curl -s -o /dev/null "http://localhost:$port/"; then
+        if curl -s --max-time 2 -o /dev/null "http://localhost:$port/"; then
             echo "wrangler dev is up on http://localhost:$port"
             return
         fi
