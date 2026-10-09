@@ -327,7 +327,7 @@ async fn the_token_is_stripped_but_the_cursor_is_kept() {
         &base,
         &id,
         Some(Cursor::new(head.epoch, 1)),
-        "&token=secret%20token",
+        "&token=%FF",
     )
     .await;
     hello(&mut ws).await;
