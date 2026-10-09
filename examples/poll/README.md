@@ -98,7 +98,7 @@ The demo needs no secrets, no KV namespace, and no D1 database.
    just examples deploy poll
    ```
 
-   Wrangler uses your `wrangler login` session, or `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment. The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: DNS: Edit" for the custom domain.
+   Wrangler uses your `wrangler login` session, or `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the environment. The API token needs the "Edit Cloudflare Workers" permissions, and "Zone: Workers Routes: Edit" on the zone for the custom domain. Cloudflare creates the DNS record itself.
 
    Or by hand, from the workspace root:
 
