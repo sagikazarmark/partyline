@@ -61,13 +61,15 @@ worker = "0.8.7"
 proptest = "1.11"
 wasm-bindgen-test = "0.3"
 
-# cargo-release: bumps the shared version, commits, tags, publishes to crates.io, and pushes.
+# cargo-release, driven by the Release workflow: bumps the shared version, commits, pushes, and publishes to crates.io.
 [workspace.metadata.release]
-allow-branch = ["main"]
-sign-commit = true
+# The Release workflow commits the version bump, without a signing key.
+# sign-commit = true
 sign-tag = true
 shared-version = true
 consolidate-commits = true
+allow-branch = ["main"]
+pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
 
