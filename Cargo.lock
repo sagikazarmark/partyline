@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "partyline"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proptest",
  "serde",
@@ -2223,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "partyline-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures",
  "futures-timer",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "partyline-dioxus"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dioxus",
  "futures",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "partyline-worker"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "futures",
