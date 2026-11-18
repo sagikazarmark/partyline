@@ -154,7 +154,7 @@ just                       # list every recipe
 
 The minimum supported Rust version is 1.91, the higher of what `dioxus` and `worker` require. CI does not check it; see [Testing](docs/testing.md) to check it locally.
 
-The four crates share one version and are released together with `cargo release`, under one `v{version}` tag.
+The four crates share one version and are released together under one `v{version}` tag by the [Release workflow](.github/workflows/release.yaml). Run it from the Actions tab with a bump (`patch`, `minor`, `major`) or an exact version.
 
 ## License
 
