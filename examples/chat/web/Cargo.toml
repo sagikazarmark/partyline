@@ -12,3 +12,6 @@ gloo-net = { workspace = true, features = ["http", "json"] }
 js-sys.workspace = true
 partyline.workspace = true
 partyline-dioxus.workspace = true
+
+[lints]
+workspace = true

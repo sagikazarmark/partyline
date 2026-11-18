@@ -7,6 +7,10 @@
 //! | `GET /api/orders/{id}` | The order and the channel head it was read at |
 //! | `POST /api/orders/{id}/events` | Apply and publish an `OrderEvent` |
 
+// `#[durable_object]` adds undocumented public methods (the JS entry points) to the Durable Object,
+// in an impl block that no attribute here can reach.
+#![allow(missing_docs)]
+
 use orders_shared::{BINDING, Order, OrderEvent, OrderSnapshot, Orders};
 use partyline_worker::{Connect, Hub, HubConfig, Publisher, close, decode_segment, reject};
 use worker::*;
