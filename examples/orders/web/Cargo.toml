@@ -11,3 +11,6 @@ gloo-net = { workspace = true, features = ["http", "json"] }
 orders-shared = { path = "../shared" }
 partyline.workspace = true
 partyline-dioxus.workspace = true
+
+[lints]
+workspace = true

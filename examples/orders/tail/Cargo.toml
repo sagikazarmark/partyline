@@ -14,3 +14,6 @@ orders-shared = { path = "../shared" }
 partyline.workspace = true
 partyline-client.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+
+[lints]
+workspace = true

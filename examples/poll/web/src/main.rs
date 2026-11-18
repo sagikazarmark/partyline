@@ -262,7 +262,7 @@ fn Presenter(id: String, join_url: String) -> Element {
     };
     let qr = qrcode::QrCode::new(join_url.as_bytes())
         .map(|code| {
-            code.render::<qrcode::render::svg::Color>()
+            code.render::<qrcode::render::svg::Color<'_>>()
                 .min_dimensions(240, 240)
                 .build()
         })

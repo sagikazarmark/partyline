@@ -15,3 +15,6 @@ partyline.workspace = true
 partyline-worker = { workspace = true, features = ["http"] }
 tower-service = "0.3"
 worker = { workspace = true, features = ["http", "axum"] }
+
+[lints]
+workspace = true
