@@ -12,7 +12,7 @@ gloo-net = { workspace = true, features = ["http", "json"] }
 js-sys.workspace = true
 partyline.workspace = true
 partyline-dioxus.workspace = true
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.15", default-features = false, features = ["svg"] }
 web-sys = { workspace = true, features = ["Window", "Location"] }
 
 [lints]
