@@ -316,6 +316,11 @@ impl<C: Channel> Hub<C> {
     /// `publish_now` of the turn. Without it, an idle channel keeps expired events until
     /// a later publish schedules the trim.
     ///
+    /// Committing together does not make a batch all-or-nothing. An error, such as an event
+    /// over [`HubConfig::max_event_bytes`], rejects only that event: the events published
+    /// before it in the turn are already stored and sent, and so are the object's own writes.
+    /// Check each event first, or treat the events already published as sent.
+    ///
     /// ```ignore
     /// self.apply(&command)?;
     /// self.hub.publish_now(&first)?;
@@ -325,6 +330,10 @@ impl<C: Channel> Hub<C> {
     pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
         let body =
             codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
+        // Clients must be able to decode what is stored. Some values encode to JSON that
+        // does not decode back, such as a NaN `f64`, which encodes as `null`.
+        codec::decode_event::<C::Event>(&body)
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
         self.store_and_send(&body)
             .map_err(PublishError::into_worker)
     }

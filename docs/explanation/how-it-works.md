@@ -41,6 +41,7 @@ The output gate holds the frames until the storage write is confirmed, so no cli
 Steps 2 and 3 never await. `hub.publish` then awaits once, to schedule the alarm for age-based trimming.
 A Durable Object that changes its own state and publishes several events in one turn calls `hub.publish_now(&event)` for each event, then `hub.schedule_trim().await` once at the end.
 `publish_now` runs only steps 2 and 3, so the state change and every event commit together, with no other request in between.
+This is not all-or-nothing: if one `publish_now` fails, the events published before it are already stored and sent.
 
 ### 3. Recover
 
