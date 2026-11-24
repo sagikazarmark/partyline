@@ -13,9 +13,14 @@
 //! | --- | --- |
 //! | `GET /partyline/ticks/{id}` | WebSocket upgrade |
 //! | `POST /api/ticks/{id}` | Publish the number in the body |
+//! | `POST /api/ticks/{id}/batch` | Publish the comma-separated numbers in the body, in one turn |
 //! | `GET /api/ticks/{id}/head` | The channel head |
 //! | `POST /api/ticks/{id}/close?tag={user}` | Close a user's sockets with 4403 |
 //! | `POST /api/ticks/{id}/reset` | Wipe the channel log with a new epoch |
+
+// `#[durable_object]` adds undocumented public methods (the JS entry points) to the Durable Object,
+// in an impl block that no attribute here can reach.
+#![allow(missing_docs)]
 
 use std::time::Duration;
 
@@ -25,9 +30,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use partyline::{Channel, Mode};
-use partyline_worker::{Connect, HubConfig, Publisher, close, decode_segment, reject};
+use partyline_worker::{Connect, Hub, HubConfig, Publisher, close, decode_segment, reject};
 use tower_service::Service;
-use worker::{Context, Env, HttpRequest, event};
+use worker::{
+    Context, DurableObject, Env, HttpRequest, Method, Request, RequestInit, State, durable_object,
+    event, wasm_bindgen,
+};
 
 /// A channel of numbers.
 pub struct Ticks;
@@ -40,14 +48,51 @@ impl Channel for Ticks {
 
 const BINDING: &str = "TICK_CHANNEL";
 
-partyline_worker::channel_object! {
-    /// A channel with a tiny retention window.
-    pub struct TickChannel: Ticks {
-        config = HubConfig::default()
+/// The base URL of the fixture's own requests to the Durable Object. The host is never
+/// resolved.
+const INTERNAL: &str = "https://fixture.internal";
+
+/// A channel with a tiny retention window.
+///
+/// It embeds the hub by hand, for one route of its own: `POST /batch` publishes a
+/// comma-separated list of numbers in one turn, with `Hub::publish_now`.
+#[durable_object]
+pub struct TickChannel {
+    hub: Hub<Ticks>,
+}
+
+impl DurableObject for TickChannel {
+    fn new(state: State, _env: Env) -> Self {
+        let config = HubConfig::default()
             .retain_events(5)
             .retain_for(Some(Duration::from_secs(3)))
             .max_event_bytes(16);
+        Self {
+            hub: Hub::new(state, config),
+        }
     }
+
+    async fn fetch(&self, mut req: Request) -> worker::Result<worker::Response> {
+        if req.path() != "/batch" {
+            return self.hub.fetch(req).await;
+        }
+        let body = req.text().await?;
+        let Ok(numbers) = body
+            .split(',')
+            .map(|n| n.trim().parse::<u64>())
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return worker::Response::error("expected comma-separated numbers", 400);
+        };
+        let mut head = self.hub.head()?;
+        for n in &numbers {
+            head = self.hub.publish_now(n)?;
+        }
+        self.hub.schedule_trim().await?;
+        worker::Response::ok(head.to_string())
+    }
+
+    partyline_worker::hub_handlers!(hub);
 }
 
 fn error(e: worker::Error) -> Response {
@@ -118,6 +163,35 @@ async fn publish(Extension(env): Extension<Env>, Path(id): Path<String>, body: S
     )
 }
 
+/// Forwards the body to the object's `/batch` route, which publishes every number in it in
+/// one turn.
+#[worker::send]
+async fn publish_batch(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    text(
+        async {
+            let mut init = RequestInit::new();
+            init.with_method(Method::Post).with_body(Some(body.into()));
+            let req = Request::new_with_init(&format!("{INTERNAL}/batch"), &init)?;
+            let mut response = env
+                .durable_object(BINDING)?
+                .id_from_name(&id)?
+                .get_stub()?
+                .fetch_with_request(req)
+                .await?;
+            let text = response.text().await?;
+            if response.status_code() != 200 {
+                return Err(worker::Error::RustError(text));
+            }
+            Ok(text)
+        }
+        .await,
+    )
+}
+
 #[worker::send]
 async fn head(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
     text(async { Publisher::<Ticks>::new(&env, BINDING)?.head(&id).await }.await)
@@ -156,6 +230,7 @@ async fn fetch(
     let mut router = Router::new()
         .route("/partyline/ticks/{id}", get(connect))
         .route("/api/ticks/{id}", post(publish))
+        .route("/api/ticks/{id}/batch", post(publish_batch))
         .route("/api/ticks/{id}/head", get(head))
         .route("/api/ticks/{id}/close", post(close_tagged))
         .route("/api/ticks/{id}/reset", post(reset))

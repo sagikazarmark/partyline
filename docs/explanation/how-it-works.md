@@ -38,6 +38,10 @@ Step 4 runs without awaiting, so no publish can land between the replay and the 
 A Durable Object runs one request at a time, so sequence numbers and fan-out are atomic per publish.
 The output gate holds the frames until the storage write is confirmed, so no client sees an event that could be lost.
 
+Steps 2 and 3 never await. `hub.publish` then awaits once, to schedule the alarm for age-based trimming.
+A Durable Object that changes its own state and publishes several events in one turn calls `hub.publish_now(&event)` for each event, then `hub.schedule_trim().await` once at the end.
+`publish_now` runs only steps 2 and 3, so the state change and every event commit together, with no other request in between.
+
 ### 3. Recover
 
 1. The connection drops: the phone locks, the network changes, the Worker restarts.
