@@ -13,6 +13,7 @@ use worker::{
     WebSocketPair, WebSocketRequestResponsePair,
 };
 
+use crate::channel::{ChannelHandle, PendingSend};
 use crate::sql_log::{self, SqlLog};
 
 /// The header the Worker uses to pass socket tags to the hub: a percent-encoded JSON array.
@@ -198,6 +199,32 @@ impl<C: Channel> Hub<C> {
         }
     }
 
+    /// Creates a hub for another channel type in the same object.
+    ///
+    /// An object that holds channels of several types has one hub per type. [`Hub::new`]
+    /// takes the object's state, so create the first hub with it and the others from that
+    /// hub:
+    ///
+    /// ```ignore
+    /// fn new(state: State, _env: Env) -> Self {
+    ///     let market = Hub::new(state, HubConfig::default().retain_for(None));
+    ///     let seats = market.sibling(HubConfig::default());
+    ///     Self { market, seats }
+    /// }
+    /// ```
+    ///
+    /// When upgrading an object from partyline 0.4, create the hub of the channel type it
+    /// held then with [`Hub::new`], so that it migrates the old channel.
+    pub fn sibling<D: Channel>(&self, config: HubConfig) -> Hub<D> {
+        use worker::wasm_bindgen::{JsCast, JsValue};
+        // A second handle on the same JavaScript object.
+        let raw: &JsValue = self.state.as_raw().as_ref();
+        let raw = raw
+            .clone()
+            .unchecked_into::<worker::worker_sys::DurableObjectState>();
+        Hub::new(State::from(raw), config)
+    }
+
     /// The Durable Object state.
     pub fn state(&self) -> &State {
         &self.state
@@ -218,7 +245,7 @@ impl<C: Channel> Hub<C> {
         Ok(self.log_of(&self.own_id()?))
     }
 
-    fn log_of(&self, id: &str) -> SqlLog {
+    pub(crate) fn log_of(&self, id: &str) -> SqlLog {
         SqlLog::new(self.state.storage().sql(), C::NAME, id)
     }
 
@@ -370,40 +397,56 @@ impl<C: Channel> Hub<C> {
         Response::from_websocket(pair.client)
     }
 
-    /// Publishes an event to every socket and returns the new head.
+    /// A handle on the channel of this hub's type with this ID, in this object.
     ///
-    /// This is [`Hub::publish_now`] followed by [`Hub::schedule_trim`]. To publish several
-    /// events in one turn, call `publish_now` for each, then `schedule_trim` once.
-    pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
-        let head = self.publish_now(event)?;
-        self.schedule_trim().await?;
-        Ok(head)
+    /// An object that holds several channels of one type, such as a private view per player,
+    /// publishes to each through its handle:
+    ///
+    /// ```ignore
+    /// self.seats.channel(&seat_id).publish_now(&view)?;
+    /// ```
+    pub fn channel(&self, id: impl Into<String>) -> ChannelHandle<'_, C> {
+        ChannelHandle::new(self, id.into())
     }
 
-    /// Publishes an event to every socket and returns the new head, without awaiting.
+    /// Whether `req` names a channel of this hub's type.
     ///
-    /// It stores the event, trims the log by count, and sends the event, all synchronously.
-    /// The object can change its own state and call `publish_now` any number of times with
-    /// no `await` in between. The Durable Object then commits all of those writes together,
-    /// and its output gate holds the sent events until the writes are stored.
+    /// An object that embeds several hubs uses it to route each request to its hub. Every
+    /// request from [`crate::Connect`] and [`crate::Publisher`] names its channel. A request
+    /// that names none, or names it in a malformed header, is for no hub in particular, so
+    /// send it to the last one, whose [`Hub::fetch`] serves the object's own channel or
+    /// answers 400:
     ///
-    /// It does not schedule age-based trimming. Call [`Hub::schedule_trim`] after the last
-    /// `publish_now` of the turn. Without it, an idle channel keeps expired events until
-    /// a later publish schedules the trim.
+    /// ```ignore
+    /// async fn fetch(&self, req: Request) -> Result<Response> {
+    ///     if self.seats.handles(&req) {
+    ///         return self.seats.fetch(req).await;
+    ///     }
+    ///     self.market.fetch_with(req, |event| self.apply(event)).await
+    /// }
+    /// ```
+    pub fn handles(&self, req: &Request) -> bool {
+        matches!(requested_channel(req), Ok(Some(Some((name, _)))) if name == C::NAME)
+    }
+
+    /// The object's own channel: the one whose ID is the object's name.
+    fn own(&self) -> worker::Result<ChannelHandle<'_, C>> {
+        Ok(self.channel(self.own_id()?))
+    }
+
+    /// Publishes an event on the object's own channel and returns the new head.
     ///
-    /// Committing together does not make a batch all-or-nothing. An error, such as an event
-    /// over [`HubConfig::max_event_bytes`], rejects only that event: the events published
-    /// before it in the turn are already stored and sent, and so are the object's own writes.
-    /// Check each event first, or treat the events already published as sent.
+    /// See [`ChannelHandle::publish`]. The object's own channel is the one whose ID is the
+    /// object's name, as [`crate::Connect`] and [`crate::Publisher`] address it by default.
+    pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
+        self.own()?.publish(event).await
+    }
+
+    /// Publishes an event on the object's own channel without awaiting, and returns the new
+    /// head.
     ///
-    /// # Not inside a block that can roll back
-    ///
-    /// Don't call `publish_now` inside a block that can roll back, such as a closure passed
-    /// to the storage's `transactionSync`. `publish_now` sends the event at once. If the
-    /// block then throws, the stored event rolls back, but the frame has already gone out.
-    /// The client then holds a sequence number that no longer exists. The next event reuses
-    /// that number, and the client drops it as a duplicate, so the event is lost with no
-    /// error. Publish after the block commits instead.
+    /// See [`ChannelHandle::publish_now`], which explains how to publish several events in
+    /// one turn, and why not to call it inside a block that can roll back.
     ///
     /// ```ignore
     /// self.apply(&command)?;
@@ -412,18 +455,7 @@ impl<C: Channel> Hub<C> {
     /// self.hub.schedule_trim().await?;
     /// ```
     pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
-        self.publish_now_to(&self.own_id()?, event)
-    }
-
-    fn publish_now_to(&self, id: &str, event: &C::Event) -> worker::Result<Cursor> {
-        let body =
-            codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
-        // Clients must be able to decode what is stored. Some values encode to JSON that
-        // does not decode back, such as a NaN `f64`, which encodes as `null`.
-        codec::decode_event::<C::Event>(&body)
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
-        self.store_and_send(id, &body)
-            .map_err(PublishError::into_worker)
+        self.own()?.publish_now(event)
     }
 
     async fn publish_raw(
@@ -438,38 +470,44 @@ impl<C: Channel> Hub<C> {
         let event = codec::decode_event::<C::Event>(body)
             .map_err(|e| PublishError::Invalid(e.to_string()))?;
         on_publish(&event).map_err(PublishError::Worker)?;
-        let head = self.store_and_send(id, body)?;
+        let pending = self.append_encoded(id, body)?;
+        let head = pending.head();
+        pending.send();
         self.schedule_trim().await.map_err(PublishError::Worker)?;
         Ok(head)
     }
 
-    /// Appends an encoded event, trims the log by count, and sends the event to every
-    /// socket. It never awaits, so it lands in the same turn as the caller's own writes.
-    fn store_and_send(&self, id: &str, body: &[u8]) -> Result<Cursor, PublishError> {
+    /// Appends an encoded event to a channel and trims its log by count, without awaiting,
+    /// and returns the frame to send to the channel's sockets.
+    pub(crate) fn append_encoded(
+        &self,
+        id: &str,
+        body: &[u8],
+    ) -> Result<PendingSend<'_>, PublishError> {
         let retention = self.config.retention(C::MODE);
         let limits = self.config.limits();
         let (head, frame) =
             server::publish_with(&mut self.log_of(id), body, &retention, &limits, now_ms())
                 .map_err(PublishError::from_server)?;
-        for ws in self.sockets_of(id) {
-            if ws.send_with_str(&frame).is_err() {
-                // The client resumes from its cursor when it reconnects.
-                let _ = ws.close(Some(close::INTERNAL_ERROR), Some("send failed"));
-            }
-        }
-        Ok(head)
+        Ok(PendingSend::new(
+            &self.state,
+            channel_tag(C::NAME, id),
+            frame,
+            head,
+        ))
     }
 
     /// The current head of the object's own channel.
     pub fn head(&self) -> worker::Result<Cursor> {
-        self.log()?.head()
+        self.own()?.head()
     }
 
-    /// Closes every socket in the object that carries `tag`, on every channel, using `code`,
-    /// and returns how many were closed.
+    /// Closes every socket in the object that carries `tag`, on every channel of every type,
+    /// using `code`, and returns how many were closed.
     ///
     /// Use it to remove a user from every channel the object holds, for example on sign-out.
-    /// [`crate::Publisher::close_tagged`] closes the sockets on one channel only.
+    /// [`ChannelHandle::close_tagged`] and [`crate::Publisher::close_tagged`] close the
+    /// sockets on one channel only.
     pub fn close_tagged(&self, tag: &str, code: u16) -> usize {
         let sockets = self.state.get_websockets_with_tag(tag);
         for ws in &sockets {
@@ -478,16 +516,13 @@ impl<C: Channel> Hub<C> {
         sockets.len()
     }
 
-    /// Wipes the log, starts a new epoch, and closes every socket with 1012.
-    ///
-    /// Clients reconnect. A Log client receives `Reset`. A Latest client adopts the new
-    /// epoch, but has nothing to show until the next publish, so publish a fresh value
-    /// right after a reset.
+    /// Wipes the log of the object's own channel, starts a new epoch, and closes the
+    /// channel's sockets with 1012. See [`ChannelHandle::reset`].
     pub fn reset(&self) -> worker::Result<Cursor> {
-        self.reset_channel(&self.own_id()?)
+        self.own()?.reset()
     }
 
-    fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
+    pub(crate) fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
         let head = self.log_of(id).reset()?;
         for ws in self.sockets_of(id) {
             let _ = ws.close(Some(close::SERVICE_RESTART), Some("channel reset"));
@@ -502,7 +537,7 @@ impl<C: Channel> Hub<C> {
     }
 
     /// Closes the sockets on the channel with this ID that carry `tag`.
-    fn close_tagged_on(&self, id: &str, tag: &str, code: u16) -> usize {
+    pub(crate) fn close_tagged_on(&self, id: &str, tag: &str, code: u16) -> usize {
         let channel = channel_tag(C::NAME, id);
         let mut closed = 0;
         // The runtime looks up one tag at a time, so filter by the channel's tag.
@@ -609,7 +644,7 @@ impl<C: Channel> Hub<C> {
     }
 }
 
-enum PublishError {
+pub(crate) enum PublishError {
     Invalid(String),
     TooLarge(String),
     Worker(worker::Error),
@@ -626,7 +661,7 @@ impl PublishError {
         }
     }
 
-    fn into_worker(self) -> worker::Error {
+    pub(crate) fn into_worker(self) -> worker::Error {
         match self {
             Self::Invalid(e) | Self::TooLarge(e) => worker::Error::RustError(e),
             Self::Worker(e) => e,

@@ -13,6 +13,10 @@ class_name = "TickChannel"
 name = "LEGACY_CHANNEL"
 class_name = "LegacyChannel"
 
+[[durable_objects.bindings]]
+name = "ROOM_CHANNEL"
+class_name = "RoomChannel"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TickChannel"]
@@ -20,3 +24,7 @@ new_sqlite_classes = ["TickChannel"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["LegacyChannel"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RoomChannel"]

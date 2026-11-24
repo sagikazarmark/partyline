@@ -5,10 +5,20 @@
 //!
 //! - [`Hub`]: embed it in your own Durable Object and delegate the handlers to it with
 //!   [`hub_handlers!`], or generate the whole object with [`channel_object!`].
+//! - [`ChannelHandle`]: one channel of a hub, for an object that holds several channels.
 //! - [`Connect`]: forward a client's WebSocket upgrade from the Worker to the hub.
 //! - [`Publisher`]: publish events, read the head, close sockets by tag, and reset.
 //!
 //! The Durable Object class must use the SQLite storage backend.
+//!
+//! # Several channels in one object
+//!
+//! By default each channel is its own object, named by the channel ID. An object can also
+//! hold several channels: several IDs of one channel type, and channels of several types,
+//! each type with its own `Hub`. The object then changes its own state and publishes to all
+//! of them in one turn. [`Connect::object`] and [`Publisher::object`] address such an
+//! object, [`Hub::channel`] publishes to one of its channels, and [`Hub::handles`] routes
+//! each request to its hub.
 //!
 //! partyline is not affiliated with Cloudflare or PartyKit, and is not wire-compatible with
 //! PartyServer or partysocket.
@@ -22,10 +32,12 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod channel;
 mod helpers;
 mod hub;
 mod sql_log;
 
+pub use channel::{ChannelHandle, PendingSend};
 pub use helpers::{Connect, Publisher, reject};
 pub use hub::{Hub, HubConfig};
 pub use sql_log::SqlLog;
@@ -124,14 +136,24 @@ macro_rules! channel_object {
 /// }
 /// ```
 ///
+/// An object that embeds several hubs names every hub field. The WebSocket handlers do not
+/// depend on the channel, so the first hub runs them. The `alarm` handler calls
+/// [`Hub::on_alarm`] on every hub, so each trims its own channels:
+///
+/// ```ignore
+/// partyline_worker::hub_handlers!(market, seats);
+/// ```
+///
 /// An object with its own alarm uses [`hub_websocket_handlers!`] and writes `alarm` itself.
 #[macro_export]
 macro_rules! hub_handlers {
-    ($hub:ident) => {
+    ($hub:ident $(, $more:ident)* $(,)?) => {
         $crate::hub_websocket_handlers!($hub);
 
         async fn alarm(&self) -> ::worker::Result<::worker::Response> {
-            self.$hub.on_alarm().await
+            self.$hub.on_alarm().await?;
+            $(self.$more.on_alarm().await?;)*
+            ::worker::Response::ok("")
         }
     };
 }
@@ -139,8 +161,9 @@ macro_rules! hub_handlers {
 /// Generates the `websocket_message`, `websocket_close`, and `websocket_error` handlers of a
 /// Durable Object that embeds a [`Hub`], delegating each to the hub.
 ///
-/// Use it in an object with its own alarm. Its `alarm` handler calls [`Hub::on_alarm`]; see
-/// [the `Hub` docs](Hub#alarms).
+/// Use it in an object with its own alarm. Its `alarm` handler calls [`Hub::on_alarm`] on
+/// every hub; see [the `Hub` docs](Hub#alarms). An object with several hubs may name them
+/// all, as in [`hub_handlers!`], but only the first one runs the handlers.
 ///
 /// ```ignore
 /// impl DurableObject for PollObject {
@@ -157,7 +180,7 @@ macro_rules! hub_handlers {
 /// ```
 #[macro_export]
 macro_rules! hub_websocket_handlers {
-    ($hub:ident) => {
+    ($hub:ident $(, $more:ident)* $(,)?) => {
         async fn websocket_message(
             &self,
             ws: ::worker::WebSocket,

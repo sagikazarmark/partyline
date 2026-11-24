@@ -548,3 +548,128 @@ async fn close_and_reset_act_on_one_channel_in_an_object() {
         ServerFrame::Event { seq: 2, event: 2 }
     );
 }
+
+/// Asserts that no frame arrives on the socket for a while.
+async fn assert_silent(ws: &mut Socket) {
+    let next = timeout(Duration::from_millis(500), ws.next()).await;
+    assert!(next.is_err(), "expected no frame, got {next:?}");
+}
+
+/// The fixture's room API for `room`.
+fn room_api(room: &str, action: &str) -> String {
+    format!("/api/rooms/{}{action}", encode_segment(room))
+}
+
+#[tokio::test]
+async fn hubs_of_two_types_share_an_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ticks = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &in_room).await;
+    hello(&mut ticks).await;
+    hello(&mut view).await;
+
+    // One turn stores and sends an event on each hub's channel.
+    let heads = post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:feed=1;views:alice=7",
+    )
+    .await;
+    assert_eq!(heads.split(',').count(), 2);
+    assert_eq!(
+        frame(&mut ticks).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+    assert_eq!(
+        frame(&mut view).await,
+        ServerFrame::Event { seq: 1, event: 7 }
+    );
+
+    // `Publisher` reaches the Latest hub, which `Hub::handles` picks out.
+    post_body(&base, &room_api(&room, "/views/alice"), "8").await;
+    assert_eq!(
+        frame(&mut view).await,
+        ServerFrame::Event { seq: 2, event: 8 }
+    );
+    assert_silent(&mut ticks).await;
+
+    // A Latest client that is behind gets the latest value.
+    let mut ws = open_route(
+        &base,
+        "room-views",
+        "alice",
+        Some(Cursor::new(0, 0)),
+        &in_room,
+    )
+    .await;
+    hello(&mut ws).await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 8 }
+    );
+}
+
+#[tokio::test]
+async fn appended_events_reach_sockets_only_when_sent_and_none_is_lost() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ws = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let start = hello(&mut ws).await;
+
+    // Stored, but never sent, as if the object stopped after the commit.
+    post_body(&base, &room_api(&room, "/commit?send=0"), "ticks:feed=1").await;
+    assert_silent(&mut ws).await;
+
+    // The next event is sent. The socket sees a gap, which a client resumes over.
+    post_body(&base, &room_api(&room, "/commit"), "ticks:feed=2").await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+
+    // Resuming from the start replays both events: the unsent one was stored.
+    let mut ws = open_route(
+        &base,
+        "room-ticks",
+        "feed",
+        Some(Cursor::new(start.epoch, 0)),
+        &in_room,
+    )
+    .await;
+    hello(&mut ws).await;
+    for n in 1..=2 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_hub_closes_a_tag_on_every_channel_in_the_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let alice = format!("&room={}&user=alice", encode_segment(&room));
+    let bob = format!("&room={}&user=bob", encode_segment(&room));
+    let mut feed = open_route(&base, "room-ticks", "feed", None, &alice).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &alice).await;
+    let mut other = open_route(&base, "room-ticks", "feed", None, &bob).await;
+    hello(&mut feed).await;
+    hello(&mut view).await;
+    hello(&mut other).await;
+
+    let closed = post(&base, &room_api(&room, "/close?tag=alice")).await;
+    assert_eq!(closed, "2");
+    assert_eq!(close_code(&mut feed).await, Some(close::FORBIDDEN));
+    assert_eq!(close_code(&mut view).await, Some(close::FORBIDDEN));
+
+    // Bob stays connected.
+    post_body(&base, &room_api(&room, "/commit"), "ticks:feed=1").await;
+    assert_eq!(
+        frame(&mut other).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+}

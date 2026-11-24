@@ -23,12 +23,18 @@
 //! | `POST /api/legacy/{id}` | Publish the number in the body there |
 //! | `POST /api/legacy/{id}/seed` | Write 0.4 tables into the object, before its hub exists |
 //! | `GET /api/legacy/{id}/tables` | The object's partyline tables |
+//! | `GET /partyline/room-ticks/{id}?room={room}` | WebSocket upgrade to a Log channel in a room's object |
+//! | `GET /partyline/room-views/{id}?room={room}` | WebSocket upgrade to a Latest channel in the same object |
+//! | `POST /api/rooms/{room}/commit[?send=0]` | Store events on the room's channels in one turn, then send them |
+//! | `POST /api/rooms/{room}/close?tag={user}` | Close a user's sockets on every channel in the room |
+//! | `POST /api/rooms/{room}/views/{id}` | Publish the number in the body to a Latest channel, with `Publisher` |
 
 // `#[durable_object]` adds undocumented public methods (the JS entry points) to the Durable Object,
 // in an impl block that no attribute here can reach.
 #![allow(missing_docs)]
 
 mod legacy;
+mod room;
 
 use std::time::Duration;
 
@@ -37,6 +43,7 @@ use axum::extract::{Extension, Path};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use partyline::frame::encode_segment;
 use partyline::{Channel, Mode};
 use partyline_worker::{Connect, Hub, HubConfig, Publisher, close, decode_segment, reject};
 use tower_service::Service;
@@ -56,6 +63,7 @@ impl Channel for Ticks {
 
 const BINDING: &str = "TICK_CHANNEL";
 const LEGACY_BINDING: &str = "LEGACY_CHANNEL";
+const ROOM_BINDING: &str = "ROOM_CHANNEL";
 
 /// The base URL of the fixture's own requests to the Durable Object. The host is never
 /// resolved.
@@ -267,6 +275,87 @@ async fn legacy_tables(Extension(env): Extension<Env>, Path(id): Path<String>) -
     text(call_object(&env, LEGACY_BINDING, &id, Method::Get, "/tables", None).await)
 }
 
+/// Forwards an upgrade to a channel of type `C` in the room's object. The `room` query
+/// parameter names the room, and `user` becomes a socket tag.
+async fn connect_room<C: Channel>(env: &Env, id: String, req: axum::extract::Request) -> Response {
+    let Some(room) = query_param(req.uri(), "room") else {
+        return (StatusCode::BAD_REQUEST, "missing room").into_response();
+    };
+    let mut connect = Connect::<C>::new(id).object(room);
+    if let Some(user) = query_param(req.uri(), "user") {
+        connect = connect.tag(user);
+    }
+    match connect.forward_http(env, ROOM_BINDING, req).await {
+        Ok(response) => response.map(axum::body::Body::new),
+        Err(e) => error(e),
+    }
+}
+
+#[worker::send]
+async fn connect_room_ticks(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
+    connect_room::<Ticks>(&env, id, req).await
+}
+
+#[worker::send]
+async fn connect_room_views(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
+    connect_room::<room::Views>(&env, id, req).await
+}
+
+#[worker::send]
+async fn commit_room(
+    Extension(env): Extension<Env>,
+    Path(room): Path<String>,
+    uri: Uri,
+    body: String,
+) -> Response {
+    let path = match uri.query() {
+        Some(query) => format!("/commit?{query}"),
+        None => "/commit".to_owned(),
+    };
+    text(call_object(&env, ROOM_BINDING, &room, Method::Post, &path, Some(body)).await)
+}
+
+#[worker::send]
+async fn close_in_room(
+    Extension(env): Extension<Env>,
+    Path(room): Path<String>,
+    uri: Uri,
+) -> Response {
+    let Some(tag) = query_param(&uri, "tag") else {
+        return (StatusCode::BAD_REQUEST, "missing tag").into_response();
+    };
+    let path = format!("/close?tag={}", encode_segment(&tag));
+    text(call_object(&env, ROOM_BINDING, &room, Method::Post, &path, None).await)
+}
+
+#[worker::send]
+async fn publish_room_view(
+    Extension(env): Extension<Env>,
+    Path((room, id)): Path<(String, String)>,
+    body: String,
+) -> Response {
+    let Ok(n) = body.trim().parse::<u64>() else {
+        return (StatusCode::BAD_REQUEST, "expected a number").into_response();
+    };
+    text(
+        async {
+            Publisher::<room::Views>::new(&env, ROOM_BINDING)?
+                .object(room)
+                .publish(&id, &n)
+                .await
+        }
+        .await,
+    )
+}
+
 #[worker::send]
 async fn head(Extension(env): Extension<Env>, Path(id): Path<String>, uri: Uri) -> Response {
     text(async { publisher(&env, &uri)?.head(&id).await }.await)
@@ -313,6 +402,11 @@ async fn fetch(
         .route("/api/legacy/{id}", post(publish_legacy))
         .route("/api/legacy/{id}/seed", post(seed_legacy))
         .route("/api/legacy/{id}/tables", get(legacy_tables))
+        .route("/partyline/room-ticks/{id}", get(connect_room_ticks))
+        .route("/partyline/room-views/{id}", get(connect_room_views))
+        .route("/api/rooms/{room}/commit", post(commit_room))
+        .route("/api/rooms/{room}/close", post(close_in_room))
+        .route("/api/rooms/{room}/views/{id}", post(publish_room_view))
         .layer(Extension(env));
     Ok(router.call(req).await?)
 }
