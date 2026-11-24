@@ -84,7 +84,7 @@ A Latest channel never sends `Reset`. A Latest client that sees a new epoch in `
 - **Ordering.** A Durable Object is single-threaded, so sequence number assignment and fan-out are atomic per publish.
 - **At least once.** The client drops any event whose `seq` is not newer than its cursor.
 - **No interleaving.** The hub accepts the socket, reads the backlog, and sends it without awaiting. No publish can land between the replay and live events.
-- **Durable before visible.** The Durable Object output gate holds outgoing messages until the storage write is confirmed.
+- **Durable before visible.** The Durable Object output gate holds outgoing messages until the storage write is confirmed. Cloudflare's documentation names only responses and outgoing requests. For WebSocket messages, this rests on the workerd source: `send` and `close` queue each message behind the output gate, and the queue is dropped if a write fails.
 - **One audience per channel.** Every event goes to every socket. To target one user, use one channel per user.
 
 ## Close codes

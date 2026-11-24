@@ -140,6 +140,14 @@ impl HubConfig {
 /// awaits, for each event, then calls [`Hub::schedule_trim`] once. The state change and the
 /// events then commit together, and no other request runs in between.
 ///
+/// # Several channels
+///
+/// A hub serves every channel of its type in the object. [`Hub::publish`], [`Hub::head`],
+/// and [`Hub::reset`] act on the object's own channel, whose ID is the object's name.
+/// [`Hub::channel`] reaches any other channel, such as a private view per player in the
+/// game's object. For channels of another type, create a second hub with [`Hub::sibling`],
+/// and route each request to its hub with [`Hub::handles`].
+///
 /// # Alarms
 ///
 /// A Durable Object has one alarm. The hub uses it for age-based trimming in [`Mode::Log`].

@@ -8,7 +8,11 @@ A stream of events of one type. A channel definition is a type that implements `
 
 ## Channel ID
 
-The ID of one instance of a channel, such as an order ID. Each channel ID is one Durable Object. The client connects to `/partyline/{channel}/{id}`.
+The ID of one instance of a channel, such as an order ID. By default each channel ID is one Durable Object, named by the ID. The client connects to `/partyline/{channel}/{id}`.
+
+## Channel tag
+
+The tag the hub gives every socket on a channel, so it can send the channel's events to that channel's sockets only: `partyline:` and a SHA-256 hash of the channel name and ID. App tags cannot start with `partyline:`.
 
 ## Cursor
 
@@ -16,7 +20,7 @@ The position of a client in a channel: `(epoch, seq)`, written `{epoch}.{seq}`. 
 
 ## Durable Object
 
-A Cloudflare Workers object with a single thread, its own storage, and a unique ID. partyline runs one per channel ID. See Cloudflare's [documentation](https://developers.cloudflare.com/durable-objects/).
+A Cloudflare Workers object with a single thread, its own storage, and a unique ID. By default partyline runs one per channel ID. One object can also hold several channels: see [Several channels in one object](../how-to/several-channels-in-one-object.md). See Cloudflare's [documentation](https://developers.cloudflare.com/durable-objects/).
 
 ## Epoch
 
@@ -36,7 +40,7 @@ The runtime removes an idle Durable Object from memory and keeps its WebSockets 
 
 ## Hub
 
-The part of a Durable Object that owns a channel's sockets and event log: `partyline_worker::Hub`. Embed it in your own object, or generate the object with `channel_object!`.
+The part of a Durable Object that owns the sockets and event logs of the object's channels of one type: `partyline_worker::Hub`. Embed it in your own object, or generate the object with `channel_object!`. An object with channels of several types has one hub per type.
 
 ## Latest mode
 
@@ -46,9 +50,13 @@ A channel mode in which each event is the whole current value, and the hub keeps
 
 A channel mode in which every event matters, and the hub keeps a window of events to replay. See [Choosing a mode](choosing-a-mode.md).
 
+## Own channel
+
+The channel of a hub's type whose ID is the object's name. It is the channel that `Connect` and `Publisher` reach by default, and the one that `Hub::publish`, `Hub::head`, and `Hub::reset` act on. `Hub::channel(id)` reaches any other.
+
 ## Publish
 
-Store an event in a channel's log, give it the next sequence number, and send it to every socket. `Publisher::publish` from the Worker, `Hub::publish` from the Durable Object.
+Store an event in a channel's log, give it the next sequence number, and send it to every socket on the channel. `Publisher::publish` from the Worker, `Hub::publish` or `hub.channel(id).publish` from the Durable Object. Inside a block that can roll back, store with `append` and send after the commit.
 
 ## Replay
 
@@ -72,7 +80,7 @@ The client's connection state: `Idle`, `Connecting`, `Open`, `Waiting`, `Unautho
 
 ## Tag
 
-A string attached to a socket when it is accepted, such as a user ID. `Publisher::close_tagged` closes the sockets with a tag. See [Target one user](../how-to/target-one-user.md).
+A string attached to a socket when it is accepted, such as a user ID. `Publisher::close_tagged` closes the sockets on one channel with a tag, and `Hub::close_tagged` closes them on every channel in the object. A socket carries at most 9 app tags, plus its channel tag. See [Target one user](../how-to/target-one-user.md).
 
 ## Token provider
 

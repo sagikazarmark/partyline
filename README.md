@@ -17,6 +17,7 @@ A client that loses its connection reconnects with its last cursor and receives 
 - **Shared types.** You define each event type once and use it in the Durable Object and in the client.
 - **Resume.** Delivery is at least once, with a per-channel sequence number. The client removes duplicates.
 - **Two channel modes.** Log mode keeps an event log and replays it. Latest mode keeps only the most recent value.
+- **Several channels per object.** One Durable Object can hold a shared feed and a private view per user, and publish to all of them in the same turn as its state change.
 - **Free when idle.** The hub keeps nothing in memory, so the Durable Object can hibernate with sockets open.
 - **Web and native.** The client runs on Dioxus web (wasm), desktop, and mobile.
 - **Testable offline.** All reconnect and resume logic is a pure state machine.

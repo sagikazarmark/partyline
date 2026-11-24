@@ -7,7 +7,8 @@ Each event gets a sequence number. A client that loses its connection reconnects
 
 Each app is one Rust Worker. It serves the app, the API, and the Durable Object classes, so the socket is same-origin: cookies work and no CORS setup is needed.
 
-Each channel ID is one Durable Object. The object owns the channel's sockets and its event log. The Worker only authorizes, forwards upgrades, and publishes.
+By default, each channel ID is one Durable Object. The object owns the channel's sockets and its event log. The Worker only authorizes, forwards upgrades, and publishes.
+An object can also hold several channels, for example a game's shared feed and a private view per player, so it can change its state and publish to all of them in one turn. See [Several channels in one object](../how-to/several-channels-in-one-object.md).
 
 | Crate | Runs in | Role |
 | --- | --- | --- |
@@ -33,16 +34,19 @@ Step 4 runs without awaiting, so no publish can land between the replay and the 
 
 1. Backend code calls `Publisher::publish(id, &event)`, or the Durable Object calls `hub.publish(&event)` itself.
 2. The hub checks the event's size and type, appends it to its SQLite log at `head + 1`, and trims the log to the retention window.
-3. The hub encodes the `Event` frame once and sends it to every socket.
+3. The hub encodes the `Event` frame once and sends it to every socket on the channel.
 
 A Durable Object runs one request at a time, so sequence numbers and fan-out are atomic per publish.
-The output gate holds the frames until the storage write is confirmed, so no client sees an event that could be lost.
+The output gate holds the frames until the storage write is confirmed, so no client sees an event that could be lost. Cloudflare's documentation names only responses and outgoing requests, but the workerd source holds WebSocket sends and closes the same way: each queued message waits for the output gate, and the queue is dropped if a write fails.
+
+The hub tags every socket with its channel when it accepts it, and sends each event to that tag. The tag is `partyline:` and a SHA-256 hash of the channel name and ID, so it fits the runtime's tag limit for any ID, and two channels in one object never share one.
 
 Steps 2 and 3 never await. `hub.publish` then awaits once, to schedule the alarm for age-based trimming.
 A Durable Object that changes its own state and publishes several events in one turn calls `hub.publish_now(&event)` for each event, then `hub.schedule_trim().await` once at the end.
 `publish_now` runs only steps 2 and 3, so the state change and every event commit together, with no other request in between.
 This is not all-or-nothing: if one `publish_now` fails, the events published before it are already stored and sent.
-For the same reason, don't call `publish_now` inside a block that can roll back, such as `transactionSync`. The frame is sent at once, so a rollback would leave clients holding an event that no longer exists. Publish after the block commits.
+For the same reason, don't call `publish_now` inside a block that can roll back, such as `transactionSync`. The frame is sent at once, so a rollback would leave clients holding an event that no longer exists.
+Inside such a block, call `append` on the channel instead: it runs step 2 and returns the frame unsent. Call `send` on it after the block commits. An event appended but never sent is not lost, because it is stored: a Log client sees the gap at the next event and resumes from its cursor.
 
 ### 3. Recover
 
