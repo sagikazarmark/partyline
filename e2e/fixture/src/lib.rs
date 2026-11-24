@@ -8,6 +8,8 @@
 //! - It holds the hooks that only tests need: magic tokens, socket tags from a query
 //!   parameter, and routes to close sockets by tag and to reset the channel. The examples
 //!   stay free of them.
+//! - On the `ticks` routes, a `room` query parameter puts the channel in the object named by
+//!   the room instead of the one named by the ID, so one object holds several channels.
 //!
 //! | Route | Action |
 //! | --- | --- |
@@ -32,7 +34,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Extension, Path};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use partyline::{Channel, Mode};
@@ -142,10 +144,23 @@ async fn connect(
     if let Some(user) = query_param(req.uri(), "user") {
         connect = connect.tag(user);
     }
+    if let Some(room) = query_param(req.uri(), "room") {
+        connect = connect.object(room);
+    }
     match connect.forward_http(&env, BINDING, req).await {
         Ok(response) => response.map(axum::body::Body::new),
         Err(e) => error(e),
     }
+}
+
+/// The publisher for the ticks channels. With a `room` query parameter, the channel is in
+/// the object named by the room, with the room's other channels.
+fn publisher(env: &Env, uri: &Uri) -> worker::Result<Publisher<Ticks>> {
+    let publisher = Publisher::<Ticks>::new(env, BINDING)?;
+    Ok(match query_param(uri, "room") {
+        Some(room) => publisher.object(room),
+        None => publisher,
+    })
 }
 
 fn text<T: ToString>(result: worker::Result<T>) -> Response {
@@ -156,18 +171,16 @@ fn text<T: ToString>(result: worker::Result<T>) -> Response {
 }
 
 #[worker::send]
-async fn publish(Extension(env): Extension<Env>, Path(id): Path<String>, body: String) -> Response {
+async fn publish(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    uri: Uri,
+    body: String,
+) -> Response {
     let Ok(n) = body.trim().parse::<u64>() else {
         return (StatusCode::BAD_REQUEST, "expected a number").into_response();
     };
-    text(
-        async {
-            Publisher::<Ticks>::new(&env, BINDING)?
-                .publish(&id, &n)
-                .await
-        }
-        .await,
-    )
+    text(async { publisher(&env, &uri)?.publish(&id, &n).await }.await)
 }
 
 /// Sends a request to one of the fixture's own routes on an object, and returns the text
@@ -255,8 +268,8 @@ async fn legacy_tables(Extension(env): Extension<Env>, Path(id): Path<String>) -
 }
 
 #[worker::send]
-async fn head(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
-    text(async { Publisher::<Ticks>::new(&env, BINDING)?.head(&id).await }.await)
+async fn head(Extension(env): Extension<Env>, Path(id): Path<String>, uri: Uri) -> Response {
+    text(async { publisher(&env, &uri)?.head(&id).await }.await)
 }
 
 #[worker::send]
@@ -270,7 +283,7 @@ async fn close_tagged(
     };
     text(
         async {
-            Publisher::<Ticks>::new(&env, BINDING)?
+            publisher(&env, req.uri())?
                 .close_tagged(&id, &tag, close::FORBIDDEN)
                 .await
         }
@@ -279,8 +292,8 @@ async fn close_tagged(
 }
 
 #[worker::send]
-async fn reset(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
-    text(async { Publisher::<Ticks>::new(&env, BINDING)?.reset(&id).await }.await)
+async fn reset(Extension(env): Extension<Env>, Path(id): Path<String>, uri: Uri) -> Response {
+    text(async { publisher(&env, &uri)?.reset(&id).await }.await)
 }
 
 #[event(fetch)]

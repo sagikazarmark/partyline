@@ -4,18 +4,21 @@ use std::marker::PhantomData;
 
 use partyline::frame::{InvalidId, encode_segment, match_connect_path};
 use partyline::{Channel, Cursor, codec};
-use worker::{Env, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
+use worker::{Env, Headers, Method, ObjectNamespace, Request, RequestInit, Response, Stub};
 
-use crate::hub::{MAX_TAGS, TAGS_HEADER, check_tag, close_reason, is_upgrade};
+use crate::hub::{
+    CHANNEL_HEADER, MAX_TAGS, TAGS_HEADER, check_tag, close_reason, encode_channel, is_upgrade,
+};
 
 /// The base URL of internal requests to the hub. The host is never resolved.
 const INTERNAL: &str = "https://partyline.internal";
 
-/// Maps a channel ID to its Durable Object. One channel ID is one Durable Object.
+/// Maps an object name to its Durable Object. The name is the channel ID, unless
+/// `Connect::object` or `Publisher::object` names another object.
 ///
 /// This is the one place to change when channels are sharded.
-fn stub(namespace: &ObjectNamespace, id: &str) -> worker::Result<Stub> {
-    namespace.id_from_name(id)?.get_stub()
+fn stub(namespace: &ObjectNamespace, object: &str) -> worker::Result<Stub> {
+    namespace.id_from_name(object)?.get_stub()
 }
 
 /// Forwards a client's WebSocket upgrade to the channel's Durable Object.
@@ -34,18 +37,35 @@ fn stub(namespace: &ObjectNamespace, id: &str) -> worker::Result<Stub> {
 #[derive(Clone, Debug)]
 pub struct Connect<C: Channel> {
     id: String,
+    object: Option<String>,
     tags: Vec<String>,
     _channel: PhantomData<fn() -> C>,
 }
 
 impl<C: Channel> Connect<C> {
-    /// Targets the channel with this ID.
+    /// Targets the channel with this ID, in the Durable Object of the same name.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            object: None,
             tags: Vec::new(),
             _channel: PhantomData,
         }
+    }
+
+    /// Forwards to the Durable Object with this name, instead of the one named by the
+    /// channel ID. Use it for a channel that lives in an object with other channels, such
+    /// as a player's private view in the game's object.
+    ///
+    /// ```ignore
+    /// Connect::<Seat>::new(&seat_id)
+    ///     .object(&game_id)
+    ///     .forward(&env, "GAME", req)
+    ///     .await
+    /// ```
+    pub fn object(mut self, name: impl Into<String>) -> Self {
+        self.object = Some(name.into());
+        self
     }
 
     /// Matches a request path against this channel's connect path,
@@ -93,9 +113,10 @@ impl<C: Channel> Connect<C> {
         for tag in &self.tags {
             check_tag(tag).map_err(worker::Error::RustError)?;
         }
-        // Copy the headers, replacing any tags header the client sent.
+        // Copy the headers, replacing any partyline header the client sent.
         let headers = req.headers().clone();
         headers.delete(TAGS_HEADER)?;
+        headers.set(CHANNEL_HEADER, &encode_channel(C::NAME, &self.id))?;
         if !self.tags.is_empty() {
             let tags = serde_json::to_string(&self.tags)
                 .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -108,7 +129,7 @@ impl<C: Channel> Connect<C> {
         init.with_method(Method::Get).with_headers(headers);
         let forwarded = Request::new_with_init(url.as_str(), &init)?;
         let namespace = env.durable_object(binding)?;
-        stub(&namespace, &self.id)?
+        stub(&namespace, self.object.as_deref().unwrap_or(&self.id))?
             .fetch_with_request(forwarded)
             .await
     }
@@ -140,16 +161,33 @@ impl<C: Channel> Connect<C> {
 #[derive(Debug)]
 pub struct Publisher<C: Channel> {
     namespace: ObjectNamespace,
+    object: Option<String>,
     _channel: PhantomData<fn() -> C>,
 }
 
 impl<C: Channel> Publisher<C> {
-    /// Uses the Durable Object namespace bound as `binding`.
+    /// Uses the Durable Object namespace bound as `binding`. Each channel is in the object
+    /// named by its ID.
     pub fn new(env: &Env, binding: &str) -> worker::Result<Self> {
         Ok(Self {
             namespace: env.durable_object(binding)?,
+            object: None,
             _channel: PhantomData,
         })
+    }
+
+    /// Calls the Durable Object with this name for every channel, instead of the one named
+    /// by each channel ID. Use it for channels that live in an object with other channels.
+    ///
+    /// ```ignore
+    /// Publisher::<Seat>::new(&env, "GAME")?
+    ///     .object(&game_id)
+    ///     .close_tagged(&seat_id, &seat_id, close::FORBIDDEN)
+    ///     .await?;
+    /// ```
+    pub fn object(mut self, name: impl Into<String>) -> Self {
+        self.object = Some(name.into());
+        self
     }
 
     /// Publishes an event to the channel with this ID and returns the new head.
@@ -197,14 +235,19 @@ impl<C: Channel> Publisher<C> {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> worker::Result<String> {
+        let headers = Headers::new();
+        headers.set(CHANNEL_HEADER, &encode_channel(C::NAME, id))?;
         let mut init = RequestInit::new();
-        init.with_method(method);
+        init.with_method(method).with_headers(headers);
         if let Some(body) = body {
             let array = worker::js_sys::Uint8Array::from(body.as_slice());
             init.with_body(Some(array.into()));
         }
         let req = Request::new_with_init(&format!("{INTERNAL}{path}"), &init)?;
-        let mut response = stub(&self.namespace, id)?.fetch_with_request(req).await?;
+        let object = self.object.as_deref().unwrap_or(id);
+        let mut response = stub(&self.namespace, object)?
+            .fetch_with_request(req)
+            .await?;
         let text = response.text().await?;
         if response.status_code() != 200 {
             return Err(worker::Error::RustError(format!(

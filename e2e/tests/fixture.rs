@@ -464,3 +464,87 @@ async fn reserved_tags_are_refused() {
     );
     assert!(tokio_tungstenite::connect_async(url).await.is_err());
 }
+
+#[tokio::test]
+async fn channels_in_one_object_are_independent() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let (a, b) = (unique("a"), unique("b"));
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    let mut ws_b = open_with(&base, &b, None, &in_room).await;
+    let head_a = hello(&mut ws_a).await;
+    let head_b = hello(&mut ws_b).await;
+    assert_ne!(head_a.epoch, head_b.epoch, "each channel has its own epoch");
+
+    let path = |id: &str| {
+        format!(
+            "/api/ticks/{}?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+    let after_a: Cursor = post_body(&base, &path(&a), "10").await.parse().unwrap();
+    let after_b: Cursor = post_body(&base, &path(&b), "20").await.parse().unwrap();
+    assert_eq!(after_a, Cursor::new(head_a.epoch, 1));
+    assert_eq!(after_b, Cursor::new(head_b.epoch, 1));
+
+    // Each socket gets only its own channel's event.
+    assert_eq!(
+        frame(&mut ws_a).await,
+        ServerFrame::Event { seq: 1, event: 10 }
+    );
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 1, event: 20 }
+    );
+    let head = |id: &str| {
+        format!(
+            "/api/ticks/{}/head?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+    assert_eq!(get_text(&base, &head(&a)).await, after_a.to_string());
+    assert_eq!(get_text(&base, &head(&b)).await, after_b.to_string());
+}
+
+#[tokio::test]
+async fn close_and_reset_act_on_one_channel_in_an_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let (a, b) = (unique("a"), unique("b"));
+    let in_room = format!("&room={}&user=alice", encode_segment(&room));
+    let api = |id: &str, action: &str| {
+        format!(
+            "/api/ticks/{}{action}?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+
+    // Alice has a socket on each channel. Closing her on channel a leaves channel b open.
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    let mut ws_b = open_with(&base, &b, None, &in_room).await;
+    hello(&mut ws_a).await;
+    hello(&mut ws_b).await;
+    let closed = post(&base, &format!("{}&tag=alice", api(&a, "/close"))).await;
+    assert_eq!(closed, "1");
+    assert_eq!(close_code(&mut ws_a).await, Some(close::FORBIDDEN));
+    post_body(&base, &api(&b, ""), "1").await;
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+
+    // Resetting channel a closes only channel a's sockets.
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    hello(&mut ws_a).await;
+    post(&base, &api(&a, "/reset")).await;
+    assert_eq!(close_code(&mut ws_a).await, Some(close::SERVICE_RESTART));
+    post_body(&base, &api(&b, ""), "2").await;
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+}

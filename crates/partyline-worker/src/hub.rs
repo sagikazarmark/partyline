@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 
-use partyline::frame::{ConnectParams, PING, PONG, decode_segment};
+use partyline::frame::{ConnectParams, PING, PONG, decode_segment, encode_segment};
 use partyline::server::{self, Limits, Log, Retention, ServerError};
 use partyline::{Channel, Cursor, Mode, close, codec};
 use worker::{
@@ -19,6 +19,27 @@ use crate::sql_log::{self, SqlLog};
 /// The hub ignores this header unless [`crate::Connect`] set it, because `Connect` strips it
 /// from client requests.
 pub(crate) const TAGS_HEADER: &str = "x-partyline-tags";
+
+/// The header the Worker uses to tell the hub which channel a request is for:
+/// `{name}/{id}`, each percent-encoded as a path segment, so neither contains a `/`.
+///
+/// [`crate::Connect`] and [`crate::Publisher`] set it on every request to the object, and
+/// `Connect` replaces any value a client sent. Without it, a request is for the object's
+/// own channel: the channel of the hub's type whose ID is the object's name.
+pub(crate) const CHANNEL_HEADER: &str = "x-partyline-channel";
+
+/// The value of [`CHANNEL_HEADER`] for a channel.
+pub(crate) fn encode_channel(name: &str, id: &str) -> String {
+    format!("{}/{}", encode_segment(name), encode_segment(id))
+}
+
+/// Reads [`CHANNEL_HEADER`]: `None` without the header, `Some(None)` for a malformed one.
+fn requested_channel(req: &Request) -> worker::Result<Option<Option<(String, String)>>> {
+    Ok(req.headers().get(CHANNEL_HEADER)?.map(|value| {
+        let (name, id) = value.split_once('/')?;
+        Some((decode_segment(name)?, decode_segment(id)?))
+    }))
+}
 
 /// The most tags a socket can carry, as the runtime allows.
 const RUNTIME_MAX_TAGS: usize = 10;
@@ -201,15 +222,19 @@ impl<C: Channel> Hub<C> {
         SqlLog::new(self.state.storage().sql(), C::NAME, id)
     }
 
-    /// Handles a request to the Durable Object.
+    /// Handles a request to the Durable Object, for the channel the request names.
+    ///
+    /// [`crate::Connect`] and [`crate::Publisher`] name the channel in a header. A request
+    /// without it is for the object's own channel, whose ID is the object's name. A request
+    /// for another channel type gets 404.
     ///
     /// | Request | Action |
     /// | --- | --- |
     /// | `GET` with `Upgrade: websocket` | Accept the socket, send `Hello`, then replay, send latest, or reset |
     /// | `POST /publish` | Append, trim, fan out, return the new cursor |
     /// | `GET /head` | Return the current cursor |
-    /// | `POST /close?tag=..&code=..` | Close sockets with a tag and close code |
-    /// | `POST /reset` | Wipe the log, start a new epoch, close every socket with 1012 |
+    /// | `POST /close?tag=..&code=..` | Close the channel's sockets that have a tag, with a close code |
+    /// | `POST /reset` | Wipe the log, start a new epoch, close the channel's sockets with 1012 |
     pub async fn fetch(&self, req: Request) -> worker::Result<Response> {
         self.fetch_with(req, |_| Ok(())).await
     }
@@ -231,7 +256,14 @@ impl<C: Channel> Hub<C> {
         mut req: Request,
         on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
     ) -> worker::Result<Response> {
-        let id = self.own_id()?;
+        let id = match requested_channel(&req)? {
+            Some(Some((name, id))) if name == C::NAME => id,
+            Some(Some((name, _))) => {
+                return Response::error(format!("this hub holds no `{name}` channels"), 404);
+            }
+            Some(None) => return Response::error(format!("malformed {CHANNEL_HEADER}"), 400),
+            None => self.own_id()?,
+        };
         if is_upgrade(&req) {
             return self.accept(&id, &req);
         }
