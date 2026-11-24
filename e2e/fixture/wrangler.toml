@@ -9,6 +9,14 @@ compatibility_date = "2026-09-01"
 name = "TICK_CHANNEL"
 class_name = "TickChannel"
 
+[[durable_objects.bindings]]
+name = "LEGACY_CHANNEL"
+class_name = "LegacyChannel"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TickChannel"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LegacyChannel"]

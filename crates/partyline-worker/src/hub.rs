@@ -13,7 +13,7 @@ use worker::{
     WebSocketPair, WebSocketRequestResponsePair,
 };
 
-use crate::sql_log::SqlLog;
+use crate::sql_log::{self, SqlLog};
 
 /// The header the Worker uses to pass socket tags to the hub: a percent-encoded JSON array.
 /// The hub ignores this header unless [`crate::Connect`] set it, because `Connect` strips it
@@ -137,9 +137,28 @@ impl<C: Channel> std::fmt::Debug for Hub<C> {
 impl<C: Channel> Hub<C> {
     /// Creates the hub. Runs the two `CREATE TABLE IF NOT EXISTS` statements and registers
     /// the `ping`/`pong` auto-response, so heartbeats do not wake the Durable Object.
+    ///
+    /// # Upgrading from partyline 0.4
+    ///
+    /// partyline 0.4 kept one channel per object, in tables of its own. The first hub
+    /// created in such an object moves that channel into the shared tables, as the channel
+    /// of this hub's type whose ID is the object's name. That is the channel the object held
+    /// in 0.4, so clients resume from their cursors without `Reset`. In an object that
+    /// embeds several hubs, create the hub of the channel type it held in 0.4 first.
     pub fn new(state: State, config: HubConfig) -> Self {
-        if let Err(e) = SqlLog::init(&state.storage().sql()) {
+        let sql = state.storage().sql();
+        if let Err(e) = SqlLog::init(&sql) {
             worker::console_error!("partyline: creating tables failed: {e}");
+        }
+        match state.id().name() {
+            Some(name) => {
+                if let Err(e) = SqlLog::migrate_legacy(&sql, C::NAME, &name) {
+                    worker::console_error!("partyline: migrating 0.4 tables failed: {e}");
+                }
+            }
+            None => worker::console_error!(
+                "partyline: the object has no name, so 0.4 tables cannot be migrated"
+            ),
         }
         match WebSocketRequestResponsePair::new(PING, PONG) {
             Ok(pair) => state.set_websocket_auto_response(&pair),
@@ -157,9 +176,23 @@ impl<C: Channel> Hub<C> {
         &self.state
     }
 
-    /// The event log.
-    pub fn log(&self) -> SqlLog {
-        SqlLog::new(self.state.storage().sql())
+    /// The ID of the object's own channel: the object's name, as `Connect` and `Publisher`
+    /// address it by default.
+    fn own_id(&self) -> worker::Result<String> {
+        self.state.id().name().ok_or_else(|| {
+            worker::Error::RustError(
+                "the Durable Object has no name, so it has no channel of its own".to_owned(),
+            )
+        })
+    }
+
+    /// The event log of the object's own channel.
+    pub fn log(&self) -> worker::Result<SqlLog> {
+        Ok(self.log_of(&self.own_id()?))
+    }
+
+    fn log_of(&self, id: &str) -> SqlLog {
+        SqlLog::new(self.state.storage().sql(), C::NAME, id)
     }
 
     /// Handles a request to the Durable Object.
@@ -192,8 +225,9 @@ impl<C: Channel> Hub<C> {
         mut req: Request,
         on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
     ) -> worker::Result<Response> {
+        let id = self.own_id()?;
         if is_upgrade(&req) {
-            return self.accept(&req);
+            return self.accept(&id, &req);
         }
         let url = req.url()?;
         match (req.method(), url.path()) {
@@ -205,14 +239,14 @@ impl<C: Channel> Hub<C> {
                         413,
                     );
                 };
-                match self.publish_raw(&body, on_publish).await {
+                match self.publish_raw(&id, &body, on_publish).await {
                     Ok(cursor) => Response::ok(cursor.to_string()),
                     Err(PublishError::Invalid(e)) => Response::error(e, 400),
                     Err(PublishError::TooLarge(e)) => Response::error(e, 413),
                     Err(PublishError::Worker(e)) => Err(e),
                 }
             }
-            (Method::Get, "/head") => Response::ok(self.head()?.to_string()),
+            (Method::Get, "/head") => Response::ok(self.log_of(&id).head()?.to_string()),
             (Method::Post, "/close") => {
                 let mut tag = None;
                 let mut code = close::FORBIDDEN;
@@ -228,7 +262,7 @@ impl<C: Channel> Hub<C> {
                 };
                 Response::ok(self.close_tagged(&tag, code).to_string())
             }
-            (Method::Post, "/reset") => Response::ok(self.reset()?.to_string()),
+            (Method::Post, "/reset") => Response::ok(self.reset_channel(&id)?.to_string()),
             _ => Response::error("Not Found", 404),
         }
     }
@@ -237,7 +271,7 @@ impl<C: Channel> Hub<C> {
     ///
     /// Accepting the socket, reading the log, and sending the handshake frames run without
     /// awaiting, so no publish can land between the replay and live events.
-    fn accept(&self, req: &Request) -> worker::Result<Response> {
+    fn accept(&self, id: &str, req: &Request) -> worker::Result<Response> {
         let url = req.url()?;
         let pair = WebSocketPair::new()?;
         let params = match ConnectParams::parse(url.query().unwrap_or("")) {
@@ -272,7 +306,7 @@ impl<C: Channel> Hub<C> {
         self.state.accept_websocket_with_tags(&pair.server, &tags);
 
         let limits = self.config.limits();
-        match server::handshake_with(C::MODE, params.cursor, &self.log(), &limits) {
+        match server::handshake_with(C::MODE, params.cursor, &self.log_of(id), &limits) {
             Ok(frames) => {
                 for frame in frames {
                     if let Err(e) = pair.server.send_with_str(frame) {
@@ -337,18 +371,23 @@ impl<C: Channel> Hub<C> {
     /// self.hub.schedule_trim().await?;
     /// ```
     pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
+        self.publish_now_to(&self.own_id()?, event)
+    }
+
+    fn publish_now_to(&self, id: &str, event: &C::Event) -> worker::Result<Cursor> {
         let body =
             codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
         // Clients must be able to decode what is stored. Some values encode to JSON that
         // does not decode back, such as a NaN `f64`, which encodes as `null`.
         codec::decode_event::<C::Event>(&body)
             .map_err(|e| worker::Error::RustError(e.to_string()))?;
-        self.store_and_send(&body)
+        self.store_and_send(id, &body)
             .map_err(PublishError::into_worker)
     }
 
     async fn publish_raw(
         &self,
+        id: &str,
         body: &[u8],
         on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
     ) -> Result<Cursor, PublishError> {
@@ -358,18 +397,18 @@ impl<C: Channel> Hub<C> {
         let event = codec::decode_event::<C::Event>(body)
             .map_err(|e| PublishError::Invalid(e.to_string()))?;
         on_publish(&event).map_err(PublishError::Worker)?;
-        let head = self.store_and_send(body)?;
+        let head = self.store_and_send(id, body)?;
         self.schedule_trim().await.map_err(PublishError::Worker)?;
         Ok(head)
     }
 
     /// Appends an encoded event, trims the log by count, and sends the event to every
     /// socket. It never awaits, so it lands in the same turn as the caller's own writes.
-    fn store_and_send(&self, body: &[u8]) -> Result<Cursor, PublishError> {
+    fn store_and_send(&self, id: &str, body: &[u8]) -> Result<Cursor, PublishError> {
         let retention = self.config.retention(C::MODE);
         let limits = self.config.limits();
         let (head, frame) =
-            server::publish_with(&mut self.log(), body, &retention, &limits, now_ms())
+            server::publish_with(&mut self.log_of(id), body, &retention, &limits, now_ms())
                 .map_err(PublishError::from_server)?;
         for ws in self.state.get_websockets() {
             if ws.send_with_str(&frame).is_err() {
@@ -380,9 +419,9 @@ impl<C: Channel> Hub<C> {
         Ok(head)
     }
 
-    /// The current head.
+    /// The current head of the object's own channel.
     pub fn head(&self) -> worker::Result<Cursor> {
-        self.log().head()
+        self.log()?.head()
     }
 
     /// Closes every socket with `tag`, using `code`, and returns how many were closed.
@@ -400,7 +439,11 @@ impl<C: Channel> Hub<C> {
     /// epoch, but has nothing to show until the next publish, so publish a fresh value
     /// right after a reset.
     pub fn reset(&self) -> worker::Result<Cursor> {
-        let head = self.log().reset()?;
+        self.reset_channel(&self.own_id()?)
+    }
+
+    fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
+        let head = self.log_of(id).reset()?;
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(close::SERVICE_RESTART), Some("channel reset"));
         }
@@ -449,11 +492,18 @@ impl<C: Channel> Hub<C> {
 
     /// Runs age-based trimming, so idle channels are trimmed too, and schedules the next run.
     ///
-    /// Call it from the object's `alarm` handler on every alarm, even one the object set
-    /// for itself. It does nothing when no event has expired.
+    /// It trims every channel of this hub's type in the object. Call it from the object's
+    /// `alarm` handler on every alarm, even one the object set for itself. It does nothing
+    /// when no event has expired.
     pub async fn on_alarm(&self) -> worker::Result<Response> {
         let retention = self.config.retention(C::MODE);
-        self.log().trim(&retention, now_ms())?;
+        let now = now_ms();
+        if let Some(cutoff) = retention.age_cutoff(now) {
+            let sql = self.state.storage().sql();
+            for id in sql_log::ids_with_events_before(&sql, C::NAME, cutoff)? {
+                self.log_of(&id).trim(&retention, now)?;
+            }
+        }
         self.schedule_trim().await?;
         Response::ok("")
     }
@@ -477,16 +527,16 @@ impl<C: Channel> Hub<C> {
     /// Schedules the alarm for when the oldest retained event expires, so age-based
     /// trimming runs even if the channel goes idle.
     ///
-    /// It does nothing in [`Mode::Latest`], when retention has no age limit, or when the
-    /// log is empty. [`Hub::publish`] and [`Hub::fetch`] call it for you. After
-    /// [`Hub::publish_now`], call it yourself, once after the last publish of the turn.
-    /// Calling it more often is harmless: like [`Hub::schedule_alarm`], it never pushes an
-    /// earlier alarm back.
+    /// It covers every channel of this hub's type in the object. It does nothing in
+    /// [`Mode::Latest`], when retention has no age limit, or when no event is retained.
+    /// [`Hub::publish`] and [`Hub::fetch`] call it for you. After [`Hub::publish_now`], call
+    /// it yourself, once after the last publish of the turn. Calling it more often is
+    /// harmless: like [`Hub::schedule_alarm`], it never pushes an earlier alarm back.
     pub async fn schedule_trim(&self) -> worker::Result<()> {
         let Some(max_age) = self.config.retention(C::MODE).max_age else {
             return Ok(());
         };
-        let Some(oldest) = self.log().oldest_ts()? else {
+        let Some(oldest) = sql_log::oldest_ts_of(&self.state.storage().sql(), C::NAME)? else {
             return Ok(());
         };
         self.schedule_alarm(oldest + max_age.as_millis() as u64 + 1)

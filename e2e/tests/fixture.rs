@@ -61,10 +61,36 @@ async fn open(base: &str, id: &str, cursor: Option<Cursor>) -> Socket {
 
 /// Opens a socket with extra query parameters, such as `&user=alice`.
 async fn open_with(base: &str, id: &str, cursor: Option<Cursor>, extra: &str) -> Socket {
+    open_route(base, "ticks", id, cursor, extra).await
+}
+
+/// Opens a socket on one of the fixture's upgrade routes, `/partyline/{route}/{id}`.
+async fn open_route(
+    base: &str,
+    route: &str,
+    id: &str,
+    cursor: Option<Cursor>,
+    extra: &str,
+) -> Socket {
     let ws_base = BaseUrl::Explicit(base.to_owned()).resolve().unwrap();
     let query = ConnectParams::new(cursor, None).to_query();
-    let url = format!("{ws_base}{}?{query}{extra}", connect_path("ticks", id));
+    let url = format!("{ws_base}{}?{query}{extra}", connect_path(route, id));
     tokio_tungstenite::connect_async(url).await.unwrap().0
+}
+
+/// Posts a body to the fixture and returns the text of the response.
+async fn post_body(base: &str, path: &str, body: &str) -> String {
+    reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .body(body.to_owned())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
 }
 
 async fn frame(ws: &mut Socket) -> ServerFrame<u64> {
@@ -386,4 +412,41 @@ async fn non_ascii_tags_work_and_invalid_tags_are_refused() {
     let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
     let url = format!("{ws_base}{}?v=1&user=", connect_path("ticks", &id));
     assert!(tokio_tungstenite::connect_async(url).await.is_err());
+}
+
+#[tokio::test]
+async fn a_0_4_channel_is_migrated_and_clients_resume_without_reset() {
+    let Some(base) = base() else { return };
+    let id = unique("legacy");
+    let api = format!("/api/legacy/{}", encode_segment(&id));
+
+    // The object holds a 0.4 channel at seq 3, and its hub does not exist yet.
+    let epoch: u64 = post(&base, &format!("{api}/seed")).await.parse().unwrap();
+    assert_eq!(
+        get_text(&base, &format!("{api}/tables")).await,
+        "partyline_log,partyline_meta"
+    );
+
+    // A client that saw event 1 under 0.4 resumes from its cursor. Connecting creates the
+    // hub, which migrates the channel.
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(epoch, 1)), "").await;
+    assert_eq!(hello(&mut ws).await, Cursor::new(epoch, 3));
+    for n in 2..=3 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+    assert_eq!(
+        get_text(&base, &format!("{api}/tables")).await,
+        "partyline_channels,partyline_events"
+    );
+
+    // The channel continues in the same epoch.
+    let head: Cursor = post_body(&base, &api, "4").await.parse().unwrap();
+    assert_eq!(head, Cursor::new(epoch, 4));
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 4, event: 4 }
+    );
 }

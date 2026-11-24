@@ -17,10 +17,16 @@
 //! | `GET /api/ticks/{id}/head` | The channel head |
 //! | `POST /api/ticks/{id}/close?tag={user}` | Close a user's sockets with 4403 |
 //! | `POST /api/ticks/{id}/reset` | Wipe the channel log with a new epoch |
+//! | `GET /partyline/legacy/{id}` | WebSocket upgrade to an object that may hold 0.4 tables |
+//! | `POST /api/legacy/{id}` | Publish the number in the body there |
+//! | `POST /api/legacy/{id}/seed` | Write 0.4 tables into the object, before its hub exists |
+//! | `GET /api/legacy/{id}/tables` | The object's partyline tables |
 
 // `#[durable_object]` adds undocumented public methods (the JS entry points) to the Durable Object,
 // in an impl block that no attribute here can reach.
 #![allow(missing_docs)]
+
+mod legacy;
 
 use std::time::Duration;
 
@@ -47,6 +53,7 @@ impl Channel for Ticks {
 }
 
 const BINDING: &str = "TICK_CHANNEL";
+const LEGACY_BINDING: &str = "LEGACY_CHANNEL";
 
 /// The base URL of the fixture's own requests to the Durable Object. The host is never
 /// resolved.
@@ -163,6 +170,35 @@ async fn publish(Extension(env): Extension<Env>, Path(id): Path<String>, body: S
     )
 }
 
+/// Sends a request to one of the fixture's own routes on an object, and returns the text
+/// of a 200 response.
+async fn call_object(
+    env: &Env,
+    binding: &str,
+    object: &str,
+    method: Method,
+    path: &str,
+    body: Option<String>,
+) -> worker::Result<String> {
+    let mut init = RequestInit::new();
+    init.with_method(method);
+    if let Some(body) = body {
+        init.with_body(Some(body.into()));
+    }
+    let req = Request::new_with_init(&format!("{INTERNAL}{path}"), &init)?;
+    let mut response = env
+        .durable_object(binding)?
+        .id_from_name(object)?
+        .get_stub()?
+        .fetch_with_request(req)
+        .await?;
+    let text = response.text().await?;
+    if response.status_code() != 200 {
+        return Err(worker::Error::RustError(text));
+    }
+    Ok(text)
+}
+
 /// Forwards the body to the object's `/batch` route, which publishes every number in it in
 /// one turn.
 #[worker::send]
@@ -171,25 +207,51 @@ async fn publish_batch(
     Path(id): Path<String>,
     body: String,
 ) -> Response {
+    text(call_object(&env, BINDING, &id, Method::Post, "/batch", Some(body)).await)
+}
+
+#[worker::send]
+async fn connect_legacy(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
+    match Connect::<Ticks>::new(id)
+        .forward_http(&env, LEGACY_BINDING, req)
+        .await
+    {
+        Ok(response) => response.map(axum::body::Body::new),
+        Err(e) => error(e),
+    }
+}
+
+#[worker::send]
+async fn publish_legacy(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let Ok(n) = body.trim().parse::<u64>() else {
+        return (StatusCode::BAD_REQUEST, "expected a number").into_response();
+    };
     text(
         async {
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post).with_body(Some(body.into()));
-            let req = Request::new_with_init(&format!("{INTERNAL}/batch"), &init)?;
-            let mut response = env
-                .durable_object(BINDING)?
-                .id_from_name(&id)?
-                .get_stub()?
-                .fetch_with_request(req)
-                .await?;
-            let text = response.text().await?;
-            if response.status_code() != 200 {
-                return Err(worker::Error::RustError(text));
-            }
-            Ok(text)
+            Publisher::<Ticks>::new(&env, LEGACY_BINDING)?
+                .publish(&id, &n)
+                .await
         }
         .await,
     )
+}
+
+#[worker::send]
+async fn seed_legacy(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
+    text(call_object(&env, LEGACY_BINDING, &id, Method::Post, "/seed", None).await)
+}
+
+#[worker::send]
+async fn legacy_tables(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
+    text(call_object(&env, LEGACY_BINDING, &id, Method::Get, "/tables", None).await)
 }
 
 #[worker::send]
@@ -234,6 +296,10 @@ async fn fetch(
         .route("/api/ticks/{id}/head", get(head))
         .route("/api/ticks/{id}/close", post(close_tagged))
         .route("/api/ticks/{id}/reset", post(reset))
+        .route("/partyline/legacy/{id}", get(connect_legacy))
+        .route("/api/legacy/{id}", post(publish_legacy))
+        .route("/api/legacy/{id}/seed", post(seed_legacy))
+        .route("/api/legacy/{id}/tables", get(legacy_tables))
         .layer(Extension(env));
     Ok(router.call(req).await?)
 }
