@@ -21,3 +21,10 @@ wildcards = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[advisories]
+ignore = [
+  # chrono is unmaintained, but has no known vulnerability. worker 0.9, its latest release,
+  # requires it. Remove this entry when worker drops chrono.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability; required by worker 0.9" },
+]
