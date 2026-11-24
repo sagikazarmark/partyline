@@ -67,7 +67,7 @@ The first argument is the channel ID, the second the tag.
 
 ## Tags
 
-A socket carries at most 10 tags. Each tag must be non-empty and at most 256 characters. `Connect::forward` returns an error for a tag that breaks these rules.
+A socket carries at most 9 tags: the runtime allows 10, and the hub uses one for the socket's channel. Each tag must be non-empty, at most 256 characters, and must not start with `partyline:`, which the hub reserves. `Connect::forward` returns an error for a tag that breaks these rules.
 Tags can hold any Unicode text. `Connect` percent-encodes them on the way to the Durable Object.
 
 Tags are useful on shared channels too: tag each socket with the user ID, and `close_tagged` removes one user from a shared channel.

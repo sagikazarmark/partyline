@@ -68,8 +68,9 @@ impl<C: Channel> Connect<C> {
 
     /// Adds a socket tag, such as the user ID. [`Publisher::close_tagged`] closes sockets by tag.
     ///
-    /// A socket carries at most 10 tags. Each must be non-empty and at most 256 characters.
-    /// [`Connect::forward`] fails if a tag breaks these rules.
+    /// A socket carries at most 9 app tags: the hub adds one for the socket's channel. Each
+    /// must be non-empty, at most 256 characters, and must not start with `partyline:`, which
+    /// the hub reserves. [`Connect::forward`] fails if a tag breaks these rules.
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self

@@ -20,8 +20,14 @@ use crate::sql_log::{self, SqlLog};
 /// from client requests.
 pub(crate) const TAGS_HEADER: &str = "x-partyline-tags";
 
-/// The most tags a socket can carry. The runtime allows 10.
-pub(crate) const MAX_TAGS: usize = 10;
+/// The most tags a socket can carry, as the runtime allows.
+const RUNTIME_MAX_TAGS: usize = 10;
+
+/// The most tags the app can give a socket: the hub uses one for the socket's channel.
+pub(crate) const MAX_TAGS: usize = RUNTIME_MAX_TAGS - 1;
+
+/// The prefix of the hub's channel tags. App tags cannot start with it.
+pub(crate) const RESERVED_TAG_PREFIX: &str = "partyline:";
 
 /// The longest tag, in UTF-16 code units, as the runtime counts.
 const MAX_TAG_LEN: usize = 256;
@@ -260,7 +266,7 @@ impl<C: Channel> Hub<C> {
                 let Some(tag) = tag else {
                     return Response::error("missing tag", 400);
                 };
-                Response::ok(self.close_tagged(&tag, code).to_string())
+                Response::ok(self.close_tagged_on(&id, &tag, code).to_string())
             }
             (Method::Post, "/reset") => Response::ok(self.reset_channel(&id)?.to_string()),
             _ => Response::error("Not Found", 404),
@@ -290,8 +296,9 @@ impl<C: Channel> Hub<C> {
             .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
             .unwrap_or_default();
         // `Connect` validates tags. An invalid one would make the runtime throw, which
-        // aborts the Durable Object, so drop any that slip through.
-        let tags: Vec<&str> = tags
+        // aborts the Durable Object, and a reserved one could join another channel, so drop
+        // any that slip through.
+        let mut tags: Vec<&str> = tags
             .iter()
             .map(String::as_str)
             .filter(|tag| match check_tag(tag) {
@@ -303,6 +310,8 @@ impl<C: Channel> Hub<C> {
             })
             .take(MAX_TAGS)
             .collect();
+        let channel = channel_tag(C::NAME, id);
+        tags.push(&channel);
         self.state.accept_websocket_with_tags(&pair.server, &tags);
 
         let limits = self.config.limits();
@@ -410,7 +419,7 @@ impl<C: Channel> Hub<C> {
         let (head, frame) =
             server::publish_with(&mut self.log_of(id), body, &retention, &limits, now_ms())
                 .map_err(PublishError::from_server)?;
-        for ws in self.state.get_websockets() {
+        for ws in self.sockets_of(id) {
             if ws.send_with_str(&frame).is_err() {
                 // The client resumes from its cursor when it reconnects.
                 let _ = ws.close(Some(close::INTERNAL_ERROR), Some("send failed"));
@@ -424,7 +433,11 @@ impl<C: Channel> Hub<C> {
         self.log()?.head()
     }
 
-    /// Closes every socket with `tag`, using `code`, and returns how many were closed.
+    /// Closes every socket in the object that carries `tag`, on every channel, using `code`,
+    /// and returns how many were closed.
+    ///
+    /// Use it to remove a user from every channel the object holds, for example on sign-out.
+    /// [`crate::Publisher::close_tagged`] closes the sockets on one channel only.
     pub fn close_tagged(&self, tag: &str, code: u16) -> usize {
         let sockets = self.state.get_websockets_with_tag(tag);
         for ws in &sockets {
@@ -444,10 +457,30 @@ impl<C: Channel> Hub<C> {
 
     fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
         let head = self.log_of(id).reset()?;
-        for ws in self.state.get_websockets() {
+        for ws in self.sockets_of(id) {
             let _ = ws.close(Some(close::SERVICE_RESTART), Some("channel reset"));
         }
         Ok(head)
+    }
+
+    /// The sockets on the channel with this ID.
+    fn sockets_of(&self, id: &str) -> Vec<WebSocket> {
+        self.state
+            .get_websockets_with_tag(&channel_tag(C::NAME, id))
+    }
+
+    /// Closes the sockets on the channel with this ID that carry `tag`.
+    fn close_tagged_on(&self, id: &str, tag: &str, code: u16) -> usize {
+        let channel = channel_tag(C::NAME, id);
+        let mut closed = 0;
+        // The runtime looks up one tag at a time, so filter by the channel's tag.
+        for ws in self.state.get_websockets_with_tag(tag) {
+            if self.state.get_tags(&ws).contains(&channel) {
+                let _ = ws.close(Some(code), Some("closed by server"));
+                closed += 1;
+            }
+        }
+        closed
     }
 
     /// Handles a message from a client. The auto-response normally answers `ping` without
@@ -604,7 +637,35 @@ pub(crate) fn check_tag(tag: &str) -> Result<(), String> {
             "a socket tag must be at most {MAX_TAG_LEN} characters"
         ));
     }
+    if tag.starts_with(RESERVED_TAG_PREFIX) {
+        return Err(format!(
+            "socket tags starting with `{RESERVED_TAG_PREFIX}` are reserved for partyline"
+        ));
+    }
     Ok(())
+}
+
+/// The tag of every socket on the channel with this name and ID: the reserved prefix and the
+/// hex SHA-256 of the name and ID, 74 characters in all.
+///
+/// A hash keeps the tag under the runtime's length limit for any ID. Channels must never
+/// share a tag, because a socket receives every event sent to its tag, so the hash must
+/// resist collisions. The name goes first with its length, so that no two pairs give the
+/// same input.
+pub(crate) fn channel_tag(name: &str, id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let mut hasher = Sha256::new();
+    hasher.update((name.len() as u64).to_be_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(id.as_bytes());
+    let mut tag = String::with_capacity(RESERVED_TAG_PREFIX.len() + 64);
+    tag.push_str(RESERVED_TAG_PREFIX);
+    for byte in hasher.finalize() {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag
 }
 
 /// Shortens a close reason to the 123 bytes the protocol allows, at a character boundary.
@@ -652,5 +713,21 @@ mod tests {
         assert!(check_tag("").is_err());
         assert!(check_tag(&"日".repeat(256)).is_ok());
         assert!(check_tag(&"a".repeat(257)).is_err());
+        assert!(check_tag("partyline:x").is_err(), "the prefix is reserved");
+        assert!(check_tag("partyline").is_ok());
+    }
+
+    #[test]
+    fn channel_tags_are_fixed_length_and_distinct() {
+        let tag = channel_tag("seat", &"x".repeat(10_000));
+        assert_eq!(tag.len(), 74);
+        assert!(tag.starts_with(RESERVED_TAG_PREFIX));
+        assert_eq!(tag, channel_tag("seat", &"x".repeat(10_000)));
+        // The length prefix keeps a shifted boundary from colliding.
+        assert_ne!(channel_tag("ab", "c"), channel_tag("a", "bc"));
+        assert_ne!(channel_tag("seat", "1"), channel_tag("seat", "2"));
+        assert_ne!(channel_tag("seat", "1"), channel_tag("market", "1"));
+        // An app tag can never equal a channel tag.
+        assert!(check_tag(&tag).is_err());
     }
 }

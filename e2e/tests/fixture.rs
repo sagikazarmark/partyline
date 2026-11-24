@@ -450,3 +450,17 @@ async fn a_0_4_channel_is_migrated_and_clients_resume_without_reset() {
         ServerFrame::Event { seq: 4, event: 4 }
     );
 }
+
+#[tokio::test]
+async fn reserved_tags_are_refused() {
+    let Some(base) = base() else { return };
+    let id = unique("tags-reserved");
+    // A tag with the hub's prefix could join another channel, so `Connect` refuses it.
+    let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
+    let url = format!(
+        "{ws_base}{}?v=1&user={}",
+        connect_path("ticks", &id),
+        encode_segment("partyline:x")
+    );
+    assert!(tokio_tungstenite::connect_async(url).await.is_err());
+}

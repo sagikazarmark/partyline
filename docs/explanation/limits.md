@@ -39,7 +39,8 @@ partyline_worker::channel_object! {
 
 | Limit | Value | Set by | Past the limit |
 | --- | --- | --- | --- |
-| Tags | At most 10 per socket | Cloudflare | `Connect::forward` returns an error |
+| Tags | At most 9 per socket. Cloudflare allows 10, and the hub uses one for the socket's channel | Cloudflare and partyline | `Connect::forward` returns an error |
+| Reserved tags | Tags that start with `partyline:` | partyline | `Connect::forward` returns an error |
 | Tag length | 1 to 256 characters | Cloudflare | `Connect::forward` returns an error |
 | Attachment | 2,048 bytes | Cloudflare | The hub uses no attachment. Your own per-socket data must fit |
 | Close reason | 123 bytes | The WebSocket protocol | The hub and `reject` cut longer reasons at a character boundary |
