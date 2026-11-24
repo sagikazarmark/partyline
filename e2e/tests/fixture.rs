@@ -174,6 +174,42 @@ async fn the_alarm_trims_by_age_on_an_idle_channel() {
     );
 }
 
+#[tokio::test]
+async fn a_batch_published_in_one_turn_arrives_in_order_and_is_trimmed_by_age() {
+    let Some(base) = base() else { return };
+    let id = unique("batch");
+    let mut ws = open(&base, &id, None).await;
+    let start = hello(&mut ws).await;
+
+    // `publish_now` three times, then `schedule_trim` once, in one Durable Object turn.
+    let text = reqwest::Client::new()
+        .post(format!("{base}/api/ticks/{}/batch", encode_segment(&id)))
+        .body("1,2,3")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let head: Cursor = text.parse().unwrap();
+    assert_eq!(head, Cursor::new(start.epoch, 3));
+    for n in 1..=3 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+    drop(ws);
+
+    // `schedule_trim` set the alarm, so the idle channel is trimmed by age.
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
+    let mut ws = open(&base, &id, Some(start)).await;
+    assert_eq!(hello(&mut ws).await, head);
+    assert_eq!(frame(&mut ws).await, ServerFrame::Reset { head });
+}
+
 async fn post(base: &str, path: &str) -> String {
     reqwest::Client::new()
         .post(format!("{base}{path}"))

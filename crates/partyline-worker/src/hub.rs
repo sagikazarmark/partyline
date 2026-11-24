@@ -105,6 +105,13 @@ impl HubConfig {
 /// }
 /// ```
 ///
+/// # Publishing in one turn
+///
+/// [`Hub::publish`] awaits once, to schedule age-based trimming. An object that changes its
+/// own state and publishes several events in one turn uses [`Hub::publish_now`], which never
+/// awaits, for each event, then calls [`Hub::schedule_trim`] once. The state change and the
+/// events then commit together, and no other request runs in between.
+///
 /// # Alarms
 ///
 /// A Durable Object has one alarm. The hub uses it for age-based trimming in [`Mode::Log`].
@@ -289,11 +296,45 @@ impl<C: Channel> Hub<C> {
     }
 
     /// Publishes an event to every socket and returns the new head.
+    ///
+    /// This is [`Hub::publish_now`] followed by [`Hub::schedule_trim`]. To publish several
+    /// events in one turn, call `publish_now` for each, then `schedule_trim` once.
     pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
+        let head = self.publish_now(event)?;
+        self.schedule_trim().await?;
+        Ok(head)
+    }
+
+    /// Publishes an event to every socket and returns the new head, without awaiting.
+    ///
+    /// It stores the event, trims the log by count, and sends the event, all synchronously.
+    /// The object can change its own state and call `publish_now` any number of times with
+    /// no `await` in between. The Durable Object then commits all of those writes together,
+    /// and its output gate holds the sent events until the writes are stored.
+    ///
+    /// It does not schedule age-based trimming. Call [`Hub::schedule_trim`] after the last
+    /// `publish_now` of the turn. Without it, an idle channel keeps expired events until
+    /// a later publish schedules the trim.
+    ///
+    /// Committing together does not make a batch all-or-nothing. An error, such as an event
+    /// over [`HubConfig::max_event_bytes`], rejects only that event: the events published
+    /// before it in the turn are already stored and sent, and so are the object's own writes.
+    /// Check each event first, or treat the events already published as sent.
+    ///
+    /// ```ignore
+    /// self.apply(&command)?;
+    /// self.hub.publish_now(&first)?;
+    /// self.hub.publish_now(&second)?;
+    /// self.hub.schedule_trim().await?;
+    /// ```
+    pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
         let body =
             codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
-        self.publish_raw(&body, |_| Ok(()))
-            .await
+        // Clients must be able to decode what is stored. Some values encode to JSON that
+        // does not decode back, such as a NaN `f64`, which encodes as `null`.
+        codec::decode_event::<C::Event>(&body)
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+        self.store_and_send(&body)
             .map_err(PublishError::into_worker)
     }
 
@@ -308,7 +349,16 @@ impl<C: Channel> Hub<C> {
         let event = codec::decode_event::<C::Event>(body)
             .map_err(|e| PublishError::Invalid(e.to_string()))?;
         on_publish(&event).map_err(PublishError::Worker)?;
+        let head = self.store_and_send(body)?;
+        self.schedule_trim().await.map_err(PublishError::Worker)?;
+        Ok(head)
+    }
+
+    /// Appends an encoded event, trims the log by count, and sends the event to every
+    /// socket. It never awaits, so it lands in the same turn as the caller's own writes.
+    fn store_and_send(&self, body: &[u8]) -> Result<Cursor, PublishError> {
         let retention = self.config.retention(C::MODE);
+        let limits = self.config.limits();
         let (head, frame) =
             server::publish_with(&mut self.log(), body, &retention, &limits, now_ms())
                 .map_err(PublishError::from_server)?;
@@ -318,9 +368,6 @@ impl<C: Channel> Hub<C> {
                 let _ = ws.close(Some(close::INTERNAL_ERROR), Some("send failed"));
             }
         }
-        self.schedule_trim(&retention)
-            .await
-            .map_err(PublishError::Worker)?;
         Ok(head)
     }
 
@@ -398,7 +445,7 @@ impl<C: Channel> Hub<C> {
     pub async fn on_alarm(&self) -> worker::Result<Response> {
         let retention = self.config.retention(C::MODE);
         self.log().trim(&retention, now_ms())?;
-        self.schedule_trim(&retention).await?;
+        self.schedule_trim().await?;
         Response::ok("")
     }
 
@@ -418,9 +465,16 @@ impl<C: Channel> Hub<C> {
         storage.set_alarm(ScheduledTime::new(date)).await
     }
 
-    /// Schedules an alarm for when the oldest event expires, if any event expires.
-    async fn schedule_trim(&self, retention: &Retention) -> worker::Result<()> {
-        let Some(max_age) = retention.max_age else {
+    /// Schedules the alarm for when the oldest retained event expires, so age-based
+    /// trimming runs even if the channel goes idle.
+    ///
+    /// It does nothing in [`Mode::Latest`], when retention has no age limit, or when the
+    /// log is empty. [`Hub::publish`] and [`Hub::fetch`] call it for you. After
+    /// [`Hub::publish_now`], call it yourself, once after the last publish of the turn.
+    /// Calling it more often is harmless: like [`Hub::schedule_alarm`], it never pushes an
+    /// earlier alarm back.
+    pub async fn schedule_trim(&self) -> worker::Result<()> {
+        let Some(max_age) = self.config.retention(C::MODE).max_age else {
             return Ok(());
         };
         let Some(oldest) = self.log().oldest_ts()? else {
