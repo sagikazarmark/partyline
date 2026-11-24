@@ -42,6 +42,7 @@ Steps 2 and 3 never await. `hub.publish` then awaits once, to schedule the alarm
 A Durable Object that changes its own state and publishes several events in one turn calls `hub.publish_now(&event)` for each event, then `hub.schedule_trim().await` once at the end.
 `publish_now` runs only steps 2 and 3, so the state change and every event commit together, with no other request in between.
 This is not all-or-nothing: if one `publish_now` fails, the events published before it are already stored and sent.
+For the same reason, don't call `publish_now` inside a block that can roll back, such as `transactionSync`. The frame is sent at once, so a rollback would leave clients holding an event that no longer exists. Publish after the block commits.
 
 ### 3. Recover
 

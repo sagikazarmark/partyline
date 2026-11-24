@@ -321,6 +321,15 @@ impl<C: Channel> Hub<C> {
     /// before it in the turn are already stored and sent, and so are the object's own writes.
     /// Check each event first, or treat the events already published as sent.
     ///
+    /// # Not inside a block that can roll back
+    ///
+    /// Don't call `publish_now` inside a block that can roll back, such as a closure passed
+    /// to the storage's `transactionSync`. `publish_now` sends the event at once. If the
+    /// block then throws, the stored event rolls back, but the frame has already gone out.
+    /// The client then holds a sequence number that no longer exists. The next event reuses
+    /// that number, and the client drops it as a duplicate, so the event is lost with no
+    /// error. Publish after the block commits instead.
+    ///
     /// ```ignore
     /// self.apply(&command)?;
     /// self.hub.publish_now(&first)?;
