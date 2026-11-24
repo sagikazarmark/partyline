@@ -516,6 +516,27 @@ impl<C: Channel> Hub<C> {
         sockets.len()
     }
 
+    /// Deletes every channel in the object, of every type: closes their sockets with 1000,
+    /// so clients do not reconnect, and drops partyline's tables. Runs synchronously.
+    ///
+    /// Use it when the object deletes its own data, in the same synchronous block, so the
+    /// object is never left with half of it. The hubs must not be used again in this
+    /// instance of the object: their next storage call fails. The next time the object
+    /// starts, [`Hub::new`] creates empty tables.
+    pub fn drop_tables(&self) -> worker::Result<()> {
+        for ws in self.state.get_websockets() {
+            let on_channel = self
+                .state
+                .get_tags(&ws)
+                .iter()
+                .any(|tag| tag.starts_with(RESERVED_TAG_PREFIX));
+            if on_channel {
+                let _ = ws.close(Some(close::NORMAL), Some("channel deleted"));
+            }
+        }
+        sql_log::drop_tables(&self.state.storage().sql())
+    }
+
     /// Wipes the log of the object's own channel, starts a new epoch, and closes the
     /// channel's sockets with 1012. See [`ChannelHandle::reset`].
     pub fn reset(&self) -> worker::Result<Cursor> {

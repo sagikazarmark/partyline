@@ -86,24 +86,6 @@ impl LegacyChannel {
         }
         Response::ok(LEGACY_EPOCH.to_string())
     }
-
-    /// The names of the object's partyline tables, comma-separated and sorted.
-    fn tables(&self) -> Result<Response> {
-        let mut names = Vec::new();
-        for row in self
-            .sql()
-            .exec(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'partyline%' ORDER BY name",
-                None,
-            )?
-            .raw()
-        {
-            if let [SqlStorageValue::String(name)] = row?.as_slice() {
-                names.push(name.clone());
-            }
-        }
-        Response::ok(names.join(","))
-    }
 }
 
 impl DurableObject for LegacyChannel {
@@ -117,7 +99,7 @@ impl DurableObject for LegacyChannel {
     async fn fetch(&self, req: Request) -> Result<Response> {
         match req.path().as_str() {
             "/seed" => self.seed(),
-            "/tables" => self.tables(),
+            "/tables" => Response::ok(crate::partyline_tables(&self.sql())?),
             _ => self.hub().fetch(req).await,
         }
     }

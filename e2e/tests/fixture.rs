@@ -673,3 +673,64 @@ async fn the_hub_closes_a_tag_on_every_channel_in_the_object() {
         ServerFrame::Event { seq: 1, event: 1 }
     );
 }
+
+#[tokio::test]
+async fn the_shared_alarm_trims_every_channel_in_the_object_by_age() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let heads: Vec<Cursor> = post_body(&base, &room_api(&room, "/commit"), "ticks:a=1;ticks:b=1")
+        .await
+        .split(',')
+        .map(|head| head.parse().unwrap())
+        .collect();
+
+    // The fixture keeps events for 3 seconds. Nothing is published meanwhile, so only the
+    // alarm can trim them, and it must trim both channels.
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
+    for (id, head) in ["a", "b"].into_iter().zip(heads) {
+        let mut ws = open_route(
+            &base,
+            "room-ticks",
+            id,
+            Some(Cursor::new(head.epoch, 0)),
+            &in_room,
+        )
+        .await;
+        assert_eq!(hello(&mut ws).await, head);
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Reset { head },
+            "channel {id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_tables_closes_every_channel_in_the_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:feed=1;views:alice=1",
+    )
+    .await;
+    let mut feed = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &in_room).await;
+    hello(&mut feed).await;
+    hello(&mut view).await;
+    // The Latest client is behind, so it gets the value first.
+    frame(&mut view).await;
+    assert_eq!(
+        get_text(&base, &room_api(&room, "/tables")).await,
+        "partyline_channels,partyline_events"
+    );
+
+    post(&base, &room_api(&room, "/drop")).await;
+    // 1000 tells the clients not to reconnect.
+    assert_eq!(close_code(&mut feed).await, Some(close::NORMAL));
+    assert_eq!(close_code(&mut view).await, Some(close::NORMAL));
+    assert_eq!(get_text(&base, &room_api(&room, "/tables")).await, "");
+}

@@ -89,6 +89,13 @@ impl DurableObject for RoomChannel {
                 let closed = self.ticks.close_tagged(&tag, partyline::close::FORBIDDEN);
                 Response::ok(closed.to_string())
             }
+            "/drop" => {
+                self.ticks.drop_tables()?;
+                Response::ok("")
+            }
+            "/tables" => Response::ok(crate::partyline_tables(
+                &self.ticks.state().storage().sql(),
+            )?),
             _ if self.views.handles(&req) => self.views.fetch(req).await,
             _ => self.ticks.fetch(req).await,
         }

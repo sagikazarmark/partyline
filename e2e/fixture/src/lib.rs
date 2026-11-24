@@ -28,6 +28,8 @@
 //! | `POST /api/rooms/{room}/commit[?send=0]` | Store events on the room's channels in one turn, then send them |
 //! | `POST /api/rooms/{room}/close?tag={user}` | Close a user's sockets on every channel in the room |
 //! | `POST /api/rooms/{room}/views/{id}` | Publish the number in the body to a Latest channel, with `Publisher` |
+//! | `POST /api/rooms/{room}/drop` | Delete every channel in the room, with `Hub::drop_tables` |
+//! | `GET /api/rooms/{room}/tables` | The room object's partyline tables |
 
 // `#[durable_object]` adds undocumented public methods (the JS entry points) to the Durable Object,
 // in an impl block that no attribute here can reach.
@@ -189,6 +191,23 @@ async fn publish(
         return (StatusCode::BAD_REQUEST, "expected a number").into_response();
     };
     text(async { publisher(&env, &uri)?.publish(&id, &n).await }.await)
+}
+
+/// The names of an object's partyline tables, comma-separated and sorted.
+pub(crate) fn partyline_tables(sql: &worker::SqlStorage) -> worker::Result<String> {
+    let mut names = Vec::new();
+    for row in sql
+        .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'partyline%' ORDER BY name",
+            None,
+        )?
+        .raw()
+    {
+        if let [worker::SqlStorageValue::String(name)] = row?.as_slice() {
+            names.push(name.clone());
+        }
+    }
+    Ok(names.join(","))
 }
 
 /// Sends a request to one of the fixture's own routes on an object, and returns the text
@@ -357,6 +376,16 @@ async fn publish_room_view(
 }
 
 #[worker::send]
+async fn drop_room(Extension(env): Extension<Env>, Path(room): Path<String>) -> Response {
+    text(call_object(&env, ROOM_BINDING, &room, Method::Post, "/drop", None).await)
+}
+
+#[worker::send]
+async fn room_tables(Extension(env): Extension<Env>, Path(room): Path<String>) -> Response {
+    text(call_object(&env, ROOM_BINDING, &room, Method::Get, "/tables", None).await)
+}
+
+#[worker::send]
 async fn head(Extension(env): Extension<Env>, Path(id): Path<String>, uri: Uri) -> Response {
     text(async { publisher(&env, &uri)?.head(&id).await }.await)
 }
@@ -407,6 +436,8 @@ async fn fetch(
         .route("/api/rooms/{room}/commit", post(commit_room))
         .route("/api/rooms/{room}/close", post(close_in_room))
         .route("/api/rooms/{room}/views/{id}", post(publish_room_view))
+        .route("/api/rooms/{room}/drop", post(drop_room))
+        .route("/api/rooms/{room}/tables", get(room_tables))
         .layer(Extension(env));
     Ok(router.call(req).await?)
 }

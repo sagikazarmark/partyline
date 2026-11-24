@@ -248,6 +248,13 @@ impl Log for SqlLog {
     }
 }
 
+/// Drops the shared tables, with every channel of every type in the object.
+pub(crate) fn drop_tables(sql: &SqlStorage) -> worker::Result<()> {
+    sql.exec("DROP TABLE IF EXISTS partyline_events", None)?;
+    sql.exec("DROP TABLE IF EXISTS partyline_channels", None)?;
+    Ok(())
+}
+
 /// The timestamp of the oldest retained event on any channel named `name`.
 pub(crate) fn oldest_ts_of(sql: &SqlStorage, name: &str) -> worker::Result<Option<u64>> {
     scalar(
