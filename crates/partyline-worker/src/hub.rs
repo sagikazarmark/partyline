@@ -186,15 +186,8 @@ impl<C: Channel> Hub<C> {
         if let Err(e) = SqlLog::init(&sql) {
             worker::console_error!("partyline: creating tables failed: {e}");
         }
-        match state.id().name() {
-            Some(name) => {
-                if let Err(e) = SqlLog::migrate_legacy(&sql, C::NAME, &name) {
-                    worker::console_error!("partyline: migrating 0.4 tables failed: {e}");
-                }
-            }
-            None => worker::console_error!(
-                "partyline: the object has no name, so 0.4 tables cannot be migrated"
-            ),
+        if let Err(e) = SqlLog::migrate_legacy(&sql, C::NAME, &own_id(&state)) {
+            worker::console_error!("partyline: migrating 0.4 tables failed: {e}");
         }
         match WebSocketRequestResponsePair::new(PING, PONG) {
             Ok(pair) => state.set_websocket_auto_response(&pair),
@@ -223,8 +216,18 @@ impl<C: Channel> Hub<C> {
     ///
     /// When upgrading an object from partyline 0.4, create the hub of the channel type it
     /// held then with [`Hub::new`], so that it migrates the old channel.
+    ///
+    /// # Panics
+    ///
+    /// If both channel types have the same `NAME`. Their channels would share logs and
+    /// sockets, so this is a mistake in the object's code.
     pub fn sibling<D: Channel>(&self, config: HubConfig) -> Hub<D> {
         use worker::wasm_bindgen::{JsCast, JsValue};
+        assert_ne!(
+            C::NAME,
+            D::NAME,
+            "two hubs in one object must have channel types with different names"
+        );
         // A second handle on the same JavaScript object.
         let raw: &JsValue = self.state.as_raw().as_ref();
         let raw = raw
@@ -238,19 +241,13 @@ impl<C: Channel> Hub<C> {
         &self.state
     }
 
-    /// The ID of the object's own channel: the object's name, as `Connect` and `Publisher`
-    /// address it by default.
-    fn own_id(&self) -> worker::Result<String> {
-        self.state.id().name().ok_or_else(|| {
-            worker::Error::RustError(
-                "the Durable Object has no name, so it has no channel of its own".to_owned(),
-            )
-        })
+    fn own_id(&self) -> String {
+        own_id(&self.state)
     }
 
     /// The event log of the object's own channel.
-    pub fn log(&self) -> worker::Result<SqlLog> {
-        Ok(self.log_of(&self.own_id()?))
+    pub fn log(&self) -> SqlLog {
+        self.log_of(&self.own_id())
     }
 
     pub(crate) fn log_of(&self, id: &str) -> SqlLog {
@@ -286,10 +283,30 @@ impl<C: Channel> Hub<C> {
     ///     self.hub.fetch_with(req, |event| self.apply(event)).await
     /// }
     /// ```
+    ///
+    /// A hub with several channels uses [`Hub::fetch_with_channel`], which also passes the
+    /// channel ID.
     pub async fn fetch_with(
         &self,
-        mut req: Request,
+        req: Request,
         on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
+    ) -> worker::Result<Response> {
+        self.fetch_with_channel(req, |_, event| on_publish(event))
+            .await
+    }
+
+    /// Like [`Hub::fetch_with`], but calls `on_publish` with the ID of the channel the event
+    /// is for too, so a hub with several channels can apply the event to the right state.
+    ///
+    /// ```ignore
+    /// self.seats
+    ///     .fetch_with_channel(req, |seat_id, view| self.store_view(seat_id, view))
+    ///     .await
+    /// ```
+    pub async fn fetch_with_channel(
+        &self,
+        mut req: Request,
+        on_publish: impl FnOnce(&str, &C::Event) -> worker::Result<()>,
     ) -> worker::Result<Response> {
         let id = match requested_channel(&req)? {
             Some(Some((name, id))) if name == C::NAME => id,
@@ -297,7 +314,7 @@ impl<C: Channel> Hub<C> {
                 return Response::error(format!("this hub holds no `{name}` channels"), 404);
             }
             Some(None) => return Response::error(format!("malformed {CHANNEL_HEADER}"), 400),
-            None => self.own_id()?,
+            None => self.own_id(),
         };
         if is_upgrade(&req) {
             return self.accept(&id, &req);
@@ -438,8 +455,8 @@ impl<C: Channel> Hub<C> {
     }
 
     /// The object's own channel: the one whose ID is the object's name.
-    fn own(&self) -> worker::Result<ChannelHandle<'_, C>> {
-        Ok(self.channel(self.own_id()?))
+    fn own(&self) -> ChannelHandle<'_, C> {
+        self.channel(self.own_id())
     }
 
     /// Publishes an event on the object's own channel and returns the new head.
@@ -447,7 +464,7 @@ impl<C: Channel> Hub<C> {
     /// See [`ChannelHandle::publish`]. The object's own channel is the one whose ID is the
     /// object's name, as [`crate::Connect`] and [`crate::Publisher`] address it by default.
     pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
-        self.own()?.publish(event).await
+        self.own().publish(event).await
     }
 
     /// Publishes an event on the object's own channel without awaiting, and returns the new
@@ -463,21 +480,21 @@ impl<C: Channel> Hub<C> {
     /// self.hub.schedule_trim().await?;
     /// ```
     pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
-        self.own()?.publish_now(event)
+        self.own().publish_now(event)
     }
 
     async fn publish_raw(
         &self,
         id: &str,
         body: &[u8],
-        on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
+        on_publish: impl FnOnce(&str, &C::Event) -> worker::Result<()>,
     ) -> Result<Cursor, PublishError> {
         let limits = self.config.limits();
         server::check_size::<worker::Error>(body, &limits).map_err(PublishError::from_server)?;
         // Validate that the body is this channel's event type before storing it.
         let event = codec::decode_event::<C::Event>(body)
             .map_err(|e| PublishError::Invalid(e.to_string()))?;
-        on_publish(&event).map_err(PublishError::Worker)?;
+        on_publish(id, &event).map_err(PublishError::Worker)?;
         let pending = self.append_encoded(id, body)?;
         let head = pending.head();
         pending.send();
@@ -494,11 +511,12 @@ impl<C: Channel> Hub<C> {
     ) -> Result<PendingSend<'_>, PublishError> {
         let retention = self.config.retention(C::MODE);
         let limits = self.config.limits();
-        let (head, frame) =
-            server::publish_with(&mut self.log_of(id), body, &retention, &limits, now_ms())
-                .map_err(PublishError::from_server)?;
+        let mut log = self.log_of(id);
+        let (head, frame) = server::publish_with(&mut log, body, &retention, &limits, now_ms())
+            .map_err(PublishError::from_server)?;
         Ok(PendingSend::new(
             &self.state,
+            log,
             channel_tag(C::NAME, id),
             frame,
             head,
@@ -507,7 +525,7 @@ impl<C: Channel> Hub<C> {
 
     /// The current head of the object's own channel.
     pub fn head(&self) -> worker::Result<Cursor> {
-        self.own()?.head()
+        self.own().head()
     }
 
     /// Closes every socket in the object that carries `tag`, on every channel of every type,
@@ -553,7 +571,7 @@ impl<C: Channel> Hub<C> {
     /// Wipes the log of the object's own channel, starts a new epoch, and closes the
     /// channel's sockets with 1012. See [`ChannelHandle::reset`].
     pub fn reset(&self) -> worker::Result<Cursor> {
-        self.own()?.reset()
+        self.own().reset()
     }
 
     pub(crate) fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
@@ -790,6 +808,14 @@ pub(crate) fn is_upgrade(req: &Request) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
+/// The ID of the object's own channel: the object's name, as `Connect` and `Publisher`
+/// address it by default. An object made without a name, such as from a unique ID, uses its
+/// hex ID instead, so it still has a channel of its own.
+fn own_id(state: &State) -> String {
+    let id = state.id();
+    id.name().unwrap_or_else(|| id.to_string())
+}
+
 fn now_ms() -> u64 {
     Date::now().as_millis()
 }
@@ -830,5 +856,13 @@ mod tests {
         assert_ne!(channel_tag("seat", "1"), channel_tag("market", "1"));
         // An app tag can never equal a channel tag.
         assert!(check_tag(&tag).is_err());
+    }
+
+    #[test]
+    fn app_tags_leave_room_for_the_channel_tag() {
+        // The runtime throws on an eleventh tag, which aborts the object and drops every
+        // socket on every channel.
+        assert_eq!(RUNTIME_MAX_TAGS, 10);
+        assert_eq!(MAX_TAGS + 1, RUNTIME_MAX_TAGS);
     }
 }

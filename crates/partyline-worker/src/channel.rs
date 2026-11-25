@@ -157,22 +157,31 @@ impl<'a, C: Channel> ChannelHandle<'a, C> {
 /// An event that [`ChannelHandle::append`] stored, and that its channel's sockets have not
 /// received yet.
 ///
-/// Call [`PendingSend::send`] once the writes it belongs to are committed. Send the pending
-/// events of one channel in the order they were appended: a Log client that gets them out of
-/// order reconnects and resumes, which works but wastes a round trip.
+/// Call [`PendingSend::send`] once the writes it belongs to are committed, before the next
+/// `await`. Send the pending events of one channel in the order they were appended: a Log
+/// client that gets them out of order reconnects and resumes, which works but wastes a
+/// round trip.
 #[must_use = "the event is stored, but no socket receives it until `send` is called"]
 #[derive(Debug)]
 pub struct PendingSend<'a> {
     state: &'a State,
+    log: SqlLog,
     tag: String,
     frame: String,
     head: Cursor,
 }
 
 impl<'a> PendingSend<'a> {
-    pub(crate) fn new(state: &'a State, tag: String, frame: String, head: Cursor) -> Self {
+    pub(crate) fn new(
+        state: &'a State,
+        log: SqlLog,
+        tag: String,
+        frame: String,
+        head: Cursor,
+    ) -> Self {
         Self {
             state,
+            log,
             tag,
             frame,
             head,
@@ -185,7 +194,16 @@ impl<'a> PendingSend<'a> {
     }
 
     /// Sends the event to the channel's sockets, without awaiting.
+    ///
+    /// It sends nothing if the channel was reset since the event was stored. The reset
+    /// deleted the event, and a frame carries only its sequence number, so a client in the
+    /// new epoch would take the old event as current, and then drop new events up to its
+    /// number as duplicates.
     pub fn send(self) {
+        match self.log.head() {
+            Ok(current) if current.epoch == self.head.epoch => {}
+            _ => return,
+        }
         for ws in self.state.get_websockets_with_tag(&self.tag) {
             if ws.send_with_str(&self.frame).is_err() {
                 // The client resumes from its cursor when it reconnects.
