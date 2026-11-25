@@ -8,8 +8,9 @@
 //! - It holds the hooks that only tests need: magic tokens, socket tags from a query
 //!   parameter, and routes to close sockets by tag and to reset the channel. The examples
 //!   stay free of them.
-//! - On the `ticks` routes, a `room` query parameter puts the channel in the object named by
-//!   the room instead of the one named by the ID, so one object holds several channels.
+//! - On the `ticks` routes other than `batch`, a `room` query parameter puts the channel in
+//!   the object named by the room instead of the one named by the ID, so one object holds
+//!   several channels.
 //!
 //! | Route | Action |
 //! | --- | --- |
@@ -26,10 +27,13 @@
 //! | `GET /api/legacy/{id}/head` | The channel head |
 //! | `GET /api/legacy/{id}/tables` | The object's partyline tables |
 //! | `GET /partyline/room-ticks/{id}?room={room}` | WebSocket upgrade to a Log channel in a room's object |
+//! | `GET /partyline/room-beats/{id}?room={room}` | WebSocket upgrade to a second Log channel type in the same object |
 //! | `GET /partyline/room-views/{id}?room={room}` | WebSocket upgrade to a Latest channel in the same object |
-//! | `POST /api/rooms/{room}/commit[?send=0]` | Store events on the room's channels in one turn, then send them |
+//! | `POST /api/rooms/{room}/commit[?send=0][&hold_ms={n}]` | Store events on the room's channels in one turn, then send them |
 //! | `POST /api/rooms/{room}/close?tag={user}` | Close a user's sockets on every channel in the room |
 //! | `POST /api/rooms/{room}/views/{id}` | Publish the number in the body to a Latest channel, with `Publisher` |
+//! | `POST /api/rooms/{room}/views/{id}/reset` | Reset a Latest channel, with `Publisher` |
+//! | `POST /api/rooms/{room}/views/{id}/close?tag={user}` | Close a user's sockets on one Latest channel, with `Publisher` |
 //! | `POST /api/rooms/{room}/drop` | Delete every channel in the room, with `Hub::drop_tables` |
 //! | `GET /api/rooms/{room}/tables` | The room object's partyline tables |
 
@@ -352,6 +356,47 @@ async fn connect_room_views(
 }
 
 #[worker::send]
+async fn connect_room_beats(
+    Extension(env): Extension<Env>,
+    Path(id): Path<String>,
+    req: axum::extract::Request,
+) -> Response {
+    connect_room::<room::Beats>(&env, id, req).await
+}
+
+/// The publisher for the Latest channels of a room.
+fn views_publisher(env: &Env, room: String) -> worker::Result<Publisher<room::Views>> {
+    Ok(Publisher::<room::Views>::new(env, ROOM_BINDING)?.object(room))
+}
+
+#[worker::send]
+async fn reset_room_view(
+    Extension(env): Extension<Env>,
+    Path((room, id)): Path<(String, String)>,
+) -> Response {
+    text(async { views_publisher(&env, room)?.reset(&id).await }.await)
+}
+
+#[worker::send]
+async fn close_room_view(
+    Extension(env): Extension<Env>,
+    Path((room, id)): Path<(String, String)>,
+    uri: Uri,
+) -> Response {
+    let Some(tag) = query_param(&uri, "tag") else {
+        return (StatusCode::BAD_REQUEST, "missing tag").into_response();
+    };
+    text(
+        async {
+            views_publisher(&env, room)?
+                .close_tagged(&id, &tag, close::FORBIDDEN)
+                .await
+        }
+        .await,
+    )
+}
+
+#[worker::send]
 async fn commit_room(
     Extension(env): Extension<Env>,
     Path(room): Path<String>,
@@ -460,7 +505,10 @@ async fn fetch(
         .route("/partyline/room-views/{id}", get(connect_room_views))
         .route("/api/rooms/{room}/commit", post(commit_room))
         .route("/api/rooms/{room}/close", post(close_in_room))
+        .route("/partyline/room-beats/{id}", get(connect_room_beats))
         .route("/api/rooms/{room}/views/{id}", post(publish_room_view))
+        .route("/api/rooms/{room}/views/{id}/reset", post(reset_room_view))
+        .route("/api/rooms/{room}/views/{id}/close", post(close_room_view))
         .route("/api/rooms/{room}/drop", post(drop_room))
         .route("/api/rooms/{room}/tables", get(room_tables))
         .layer(Extension(env));
