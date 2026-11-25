@@ -43,7 +43,7 @@ pub struct Game {
 
 impl DurableObject for Game {
     fn new(state: State, _env: Env) -> Self {
-        let market = Hub::new(state, HubConfig::default().retain_for(None));
+        let market = Hub::new(state, HubConfig::default());
         let seats = market.sibling(HubConfig::default());
         Self { market, seats }
     }
@@ -59,19 +59,28 @@ The hubs share the object's one alarm. An object with its own alarm calls `on_al
 
 ## 3. Route each request to its hub
 
-`Connect` and `Publisher` name the channel in every request to the object. `Hub::handles` tells whether a request is for one of a hub's channels. Ask every hub but the last, and send the rest to the last one:
+`Connect` and `Publisher` name the channel in every request to the object. `Hub::handles` tells whether a request is for one of a hub's channels. Ask the hubs first, then match the object's own paths:
 
 ```rust
 async fn fetch(&self, req: Request) -> Result<Response> {
+    if self.seats.handles(&req) {
+        return self.seats.fetch(req).await;
+    }
+    if self.market.handles(&req) {
+        return self.market.fetch(req).await;
+    }
     match req.path().as_str() {
         "/command" => self.command(req).await,
-        _ if self.seats.handles(&req) => self.seats.fetch(req).await,
         _ => self.market.fetch(req).await,
     }
 }
 ```
 
-The last hub also serves a request that names no channel, as its own channel, whose ID is the object's name. That only happens when the app forwards a request without `Connect` or `Publisher`.
+The order matters. The hubs' internal routes are `/publish`, `/head`, `/close`, and `/reset`. An object route on one of those paths, matched before the hubs, would catch the hub's request, and for example close a tag across the object instead of on one channel.
+
+A request that names no channel goes to the last line, where the market hub serves it as its own channel, whose ID is the object's name. That only happens when the app sends a request without `Connect` or `Publisher`.
+
+`fetch` passes on events that `Publisher::publish` sends from the Worker. To apply them to the object's state as they arrive, use `fetch_with_channel`, which also passes the channel ID: `self.seats.fetch_with_channel(req, |seat_id, view| self.store_view(seat_id, view))`.
 
 ## 4. Address the object from the Worker
 
@@ -96,6 +105,8 @@ connect
 
 The client connects to `/partyline/seat/{seat_id}` as usual. It does not know which object holds the channel.
 
+Always forward upgrades with `Connect`. The hub trusts the `x-partyline-channel` header to name the socket's channel, and `Connect` replaces any value the client sent. A forward written by hand would pass the client's header on, so a client could join another player's view.
+
 ## 5. Publish in the same turn as the state change
 
 `Hub::channel` returns a handle on one channel. Change the state, then publish to every channel it affects, with no `await` in between:
@@ -110,7 +121,9 @@ async fn command(&self, req: Request) -> Result<Response> {
     for (seat_id, view) in &outcome.views {
         self.seats.channel(seat_id).publish_now(view)?;
     }
-    // Schedule age-based trimming once, after the last publish.
+    // Schedule age-based trimming once, after the last publish. Each hub trims its own
+    // channels, so call it on every hub with an age limit. The seats are Latest, and keep
+    // only their last value.
     self.market.schedule_trim().await?;
     Response::ok("")
 }
@@ -140,6 +153,8 @@ for event in pending {
 `transaction_sync` stands for your own binding of the storage's `transactionSync`, which `worker` does not provide, and `game_id` for the game's ID.
 An appended event that is never sent is not lost, because it is stored. A Log client sees the gap at the next event and resumes from its cursor. A Latest client gets the value with the next event, or when it next connects.
 
+Send right after the commit, before the next `await`. While the object awaits, other requests run, and one could reset a channel. `send` then sends nothing, because the reset deleted the event with the old epoch.
+
 ## 6. Remove a player, and delete the game
 
 `Hub::close_tagged` closes the sockets with a tag on every channel in the object, of every type. Tag each socket with the seat ID, as in step 4, to remove a player from the market and their view at once:
@@ -150,7 +165,7 @@ self.market.close_tagged(&seat_id, close::FORBIDDEN);
 
 `ChannelHandle::close_tagged` and `Publisher::close_tagged` close the sockets on one channel only.
 
-When the game ends and the object deletes its own data, `Hub::drop_tables` deletes every channel in the object in the same synchronous block. It closes their sockets with 1000, so clients do not reconnect.
+When the game ends and the object deletes its own data, `Hub::drop_tables` deletes every channel in the object in the same synchronous block. It closes their sockets with 1000, so clients do not reconnect. It leaves the alarm set: if nothing else uses it, delete it after the block with `storage.delete_alarm()`.
 
 ## Upgrading from partyline 0.4
 
@@ -158,7 +173,8 @@ partyline 0.4 kept one channel per object, in tables of its own. 0.5 changes the
 
 - **Storage.** The first hub created in an object moves the 0.4 channel into the new tables, as its own channel. Clients resume from their cursors without `Reset`. In an object with several hubs, create the hub of the channel type the object held in 0.4 with `Hub::new`, and the others with `Hub::sibling`.
 - **Tags.** The hub uses one of a socket's 10 tags for its channel, so a socket carries at most 9 app tags. Tags that start with `partyline:` are reserved.
-- **`SqlLog::new`** takes the channel name and ID, and `Hub::log` returns a `Result`.
+- **Sockets.** Sockets that 0.4 accepted have no channel tag, so 0.5 would not send them events. The deploy restarts the object, which disconnects them, and the clients reconnect and resume.
+- **`SqlLog::new`** takes the channel name and ID.
 
 The client protocol is unchanged, so clients need no update.
 

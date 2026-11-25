@@ -73,7 +73,7 @@ impl<'a, C: Channel> ChannelHandle<'a, C> {
         self.log().head()
     }
 
-    /// Stores an event and trims the log by count, without awaiting and without sending it.
+    /// Stores an event and trims the log, without awaiting and without sending it.
     /// Returns the event's frame, which [`PendingSend::send`] sends to the channel's sockets.
     ///
     /// Use it inside a block that can roll back, and send after the block commits. See

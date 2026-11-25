@@ -171,8 +171,9 @@ impl<C: Channel> std::fmt::Debug for Hub<C> {
 }
 
 impl<C: Channel> Hub<C> {
-    /// Creates the hub. Runs the two `CREATE TABLE IF NOT EXISTS` statements and registers
-    /// the `ping`/`pong` auto-response, so heartbeats do not wake the Durable Object.
+    /// Creates the hub. Creates partyline's tables if they do not exist, moves a 0.4 channel
+    /// into them if there is one, and registers the `ping`/`pong` auto-response, so
+    /// heartbeats do not wake the Durable Object.
     ///
     /// # Upgrading from partyline 0.4
     ///
@@ -259,6 +260,13 @@ impl<C: Channel> Hub<C> {
     /// [`crate::Connect`] and [`crate::Publisher`] name the channel in a header. A request
     /// without it is for the object's own channel, whose ID is the object's name. A request
     /// for another channel type gets 404.
+    ///
+    /// # Security
+    ///
+    /// The hub trusts the `x-partyline-channel` and `x-partyline-tags` headers. `Connect`
+    /// replaces any that a client sent. Forward client upgrades with `Connect` only: a
+    /// forward written by hand passes the client's headers on, so a client could pick the
+    /// channel it joins, such as another player's private view, or tag its own socket.
     ///
     /// | Request | Action |
     /// | --- | --- |
@@ -437,17 +445,26 @@ impl<C: Channel> Hub<C> {
     /// Whether `req` names a channel of this hub's type.
     ///
     /// An object that embeds several hubs uses it to route each request to its hub. Every
-    /// request from [`crate::Connect`] and [`crate::Publisher`] names its channel. A request
-    /// that names none, or names it in a malformed header, is for no hub in particular, so
-    /// send it to the last one, whose [`Hub::fetch`] serves the object's own channel or
-    /// answers 400:
+    /// request from [`crate::Connect`] and [`crate::Publisher`] names its channel.
+    ///
+    /// Ask the hubs before matching the object's own paths. The hubs' internal routes are
+    /// `/publish`, `/head`, `/close`, and `/reset`, so an object route on one of those paths
+    /// would otherwise catch a hub's request. A request that names no channel, or names it
+    /// in a malformed header, is for no hub in particular: after the object's own paths,
+    /// send it to one hub, whose [`Hub::fetch`] serves its own channel or answers 400.
     ///
     /// ```ignore
     /// async fn fetch(&self, req: Request) -> Result<Response> {
     ///     if self.seats.handles(&req) {
     ///         return self.seats.fetch(req).await;
     ///     }
-    ///     self.market.fetch_with(req, |event| self.apply(event)).await
+    ///     if self.market.handles(&req) {
+    ///         return self.market.fetch_with(req, |event| self.apply(event)).await;
+    ///     }
+    ///     match req.path().as_str() {
+    ///         "/command" => self.command(req).await,
+    ///         _ => self.market.fetch(req).await,
+    ///     }
     /// }
     /// ```
     pub fn handles(&self, req: &Request) -> bool {
@@ -502,7 +519,7 @@ impl<C: Channel> Hub<C> {
         Ok(head)
     }
 
-    /// Appends an encoded event to a channel and trims its log by count, without awaiting,
+    /// Appends an encoded event to a channel and trims its log, without awaiting,
     /// and returns the frame to send to the channel's sockets.
     pub(crate) fn append_encoded(
         &self,

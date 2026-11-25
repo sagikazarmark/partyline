@@ -34,6 +34,11 @@ fn stub(namespace: &ObjectNamespace, object: &str) -> worker::Result<Stub> {
 ///
 /// `Connect` refuses any request that is not a WebSocket upgrade with HTTP 426, so the
 /// hub's internal routes are never reachable by clients.
+///
+/// It also replaces the `x-partyline-channel` and `x-partyline-tags` headers, which the hub
+/// trusts to name the socket's channel and tags. Always forward client upgrades with
+/// `Connect`: a forward written by hand passes a client's own headers on, so the client
+/// could join another channel in the object.
 #[derive(Clone, Debug)]
 pub struct Connect<C: Channel> {
     id: String,

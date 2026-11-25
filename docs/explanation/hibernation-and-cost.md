@@ -20,7 +20,7 @@ The clients notice nothing.
 | Heartbeats use the runtime's auto-response: the client sends `ping`, the runtime answers `pong` | A heartbeat answered in code would wake the object every 25 s per socket |
 | The socket is one-way | No client message wakes the object |
 | Tags live on the socket, set at accept | Close-by-tag needs no in-memory map |
-| The constructor runs only two `CREATE TABLE IF NOT EXISTS` statements | A wake is cheap |
+| The constructor only creates the tables if they do not exist, and checks once for partyline 0.4 tables to migrate | A wake is cheap |
 
 The same rules apply to your code in an object that embeds a hub: keep state in storage, not in fields.
 

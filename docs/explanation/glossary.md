@@ -52,7 +52,7 @@ A channel mode in which every event matters, and the hub keeps a window of event
 
 ## Own channel
 
-The channel of a hub's type whose ID is the object's name. It is the channel that `Connect` and `Publisher` reach by default, and the one that `Hub::publish`, `Hub::head`, and `Hub::reset` act on. `Hub::channel(id)` reaches any other.
+The channel of a hub's type whose ID is the object's name. It is the channel that `Connect` and `Publisher` reach by default, and the one that `Hub::publish`, `Hub::head`, and `Hub::reset` act on. `Hub::channel(id)` reaches any other. An object made without a name, such as from a unique ID, uses its hex ID instead.
 
 ## Publish
 

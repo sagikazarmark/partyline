@@ -37,7 +37,7 @@ Step 4 runs without awaiting, so no publish can land between the replay and the 
 3. The hub encodes the `Event` frame once and sends it to every socket on the channel.
 
 A Durable Object runs one request at a time, so sequence numbers and fan-out are atomic per publish.
-The output gate holds the frames until the storage write is confirmed, so no client sees an event that could be lost. Cloudflare's documentation names only responses and outgoing requests, but the workerd source holds WebSocket sends and closes the same way: each queued message waits for the output gate, and the queue is dropped if a write fails.
+The output gate holds the frames until the storage write is confirmed, so no client sees an event that could be lost. Cloudflare's documentation names only responses and outgoing requests, but the workerd source holds WebSocket sends and closes the same way: each queued message waits for the output gate, and the queue is dropped if a write fails. See [Protocol: delivery rules](../protocol.md#delivery-rules) for the source.
 
 The hub tags every socket with its channel when it accepts it, and sends each event to that tag. The tag is `partyline:` and a SHA-256 hash of the channel name and ID, so it fits the runtime's tag limit for any ID, and two channels in one object never share one.
 
