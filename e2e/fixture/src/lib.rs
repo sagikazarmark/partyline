@@ -21,7 +21,9 @@
 //! | `POST /api/ticks/{id}/reset` | Wipe the channel log with a new epoch |
 //! | `GET /partyline/legacy/{id}` | WebSocket upgrade to an object that may hold 0.4 tables |
 //! | `POST /api/legacy/{id}` | Publish the number in the body there |
-//! | `POST /api/legacy/{id}/seed` | Write 0.4 tables into the object, before its hub exists |
+//! | `POST /api/legacy/{id}/seed[?epoch={n}&again=1]` | Write 0.4 tables into the object, before its hub exists, or again after it |
+//! | `POST /api/legacy/{id}/remigrate` | Run the migration again in the same instance, as the next wake would |
+//! | `GET /api/legacy/{id}/head` | The channel head |
 //! | `GET /api/legacy/{id}/tables` | The object's partyline tables |
 //! | `GET /partyline/room-ticks/{id}?room={room}` | WebSocket upgrade to a Log channel in a room's object |
 //! | `GET /partyline/room-views/{id}?room={room}` | WebSocket upgrade to a Latest channel in the same object |
@@ -285,8 +287,29 @@ async fn publish_legacy(
 }
 
 #[worker::send]
-async fn seed_legacy(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
-    text(call_object(&env, LEGACY_BINDING, &id, Method::Post, "/seed", None).await)
+async fn seed_legacy(Extension(env): Extension<Env>, Path(id): Path<String>, uri: Uri) -> Response {
+    let path = match uri.query() {
+        Some(query) => format!("/seed?{query}"),
+        None => "/seed".to_owned(),
+    };
+    text(call_object(&env, LEGACY_BINDING, &id, Method::Post, &path, None).await)
+}
+
+#[worker::send]
+async fn remigrate_legacy(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
+    text(call_object(&env, LEGACY_BINDING, &id, Method::Post, "/remigrate", None).await)
+}
+
+#[worker::send]
+async fn legacy_head(Extension(env): Extension<Env>, Path(id): Path<String>) -> Response {
+    text(
+        async {
+            Publisher::<Ticks>::new(&env, LEGACY_BINDING)?
+                .head(&id)
+                .await
+        }
+        .await,
+    )
 }
 
 #[worker::send]
@@ -430,6 +453,8 @@ async fn fetch(
         .route("/partyline/legacy/{id}", get(connect_legacy))
         .route("/api/legacy/{id}", post(publish_legacy))
         .route("/api/legacy/{id}/seed", post(seed_legacy))
+        .route("/api/legacy/{id}/remigrate", post(remigrate_legacy))
+        .route("/api/legacy/{id}/head", get(legacy_head))
         .route("/api/legacy/{id}/tables", get(legacy_tables))
         .route("/partyline/room-ticks/{id}", get(connect_room_ticks))
         .route("/partyline/room-views/{id}", get(connect_room_views))

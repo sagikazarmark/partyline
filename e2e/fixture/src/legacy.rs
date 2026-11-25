@@ -60,9 +60,12 @@ impl LegacyChannel {
         }
     }
 
-    /// Writes a 0.4 channel at seq 3, with the events 1, 2, and 3.
-    fn seed(&self) -> Result<Response> {
-        if self.hub.get().is_some() {
+    /// Writes a 0.4 channel in `epoch`, at seq 3, with the events 1, 2, and 3.
+    ///
+    /// With `again`, it writes them even though the hub exists, as a 0.4 Worker would after
+    /// a rollback. `POST /remigrate` then runs the migration again.
+    fn seed(&self, epoch: i64, again: bool) -> Result<Response> {
+        if self.hub.get().is_some() && !again {
             return Response::error("the hub already exists", 409);
         }
         let sql = self.sql();
@@ -71,7 +74,7 @@ impl LegacyChannel {
         }
         sql.exec(
             "INSERT INTO partyline_meta (id, epoch, head) VALUES (1, ?, 3)",
-            vec![LEGACY_EPOCH.into()],
+            vec![epoch.into()],
         )?;
         let now = worker::Date::now().as_millis() as i64;
         for seq in 1..=3_i64 {
@@ -84,7 +87,19 @@ impl LegacyChannel {
                 ],
             )?;
         }
-        Response::ok(LEGACY_EPOCH.to_string())
+        Response::ok(epoch.to_string())
+    }
+
+    /// Creates another hub on the same state, which runs the migration again, as the next
+    /// wake of the object would.
+    fn remigrate(&self) -> Result<Response> {
+        use worker::wasm_bindgen::{JsCast, JsValue};
+        let raw: &JsValue = self.hub().state().as_raw().as_ref();
+        let raw = raw
+            .clone()
+            .unchecked_into::<worker::worker_sys::DurableObjectState>();
+        drop(Hub::<Ticks>::new(State::from(raw), HubConfig::default()));
+        Response::ok("")
     }
 }
 
@@ -97,8 +112,19 @@ impl DurableObject for LegacyChannel {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        let url = req.url()?;
+        let param = |name: &str| {
+            url.query_pairs()
+                .find_map(|(k, v)| (k == name).then(|| v.into_owned()))
+        };
         match req.path().as_str() {
-            "/seed" => self.seed(),
+            "/seed" => {
+                let epoch = param("epoch")
+                    .and_then(|e| e.parse().ok())
+                    .unwrap_or(LEGACY_EPOCH);
+                self.seed(epoch, param("again").as_deref() == Some("1"))
+            }
+            "/remigrate" => self.remigrate(),
             "/tables" => Response::ok(crate::partyline_tables(&self.sql())?),
             _ => self.hub().fetch(req).await,
         }

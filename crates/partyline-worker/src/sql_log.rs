@@ -7,7 +7,11 @@ use worker::{SqlStorage, SqlStorageValue};
 /// The statements the hub runs in its constructor.
 ///
 /// Every channel in the object shares the two tables, keyed by the channel's name and ID.
-pub(crate) const SCHEMA: [&str; 2] = [
+///
+/// Event rows hold bodies of up to 64 KiB, so the events table keeps its rowid: SQLite
+/// recommends `WITHOUT ROWID` for small rows only. The index on `(name, ts)` keeps the
+/// age-based trim and its alarm from scanning every event of a channel type.
+pub(crate) const SCHEMA: [&str; 3] = [
     "CREATE TABLE IF NOT EXISTS partyline_channels (
         name  TEXT    NOT NULL,
         id    TEXT    NOT NULL,
@@ -22,7 +26,8 @@ pub(crate) const SCHEMA: [&str; 2] = [
         ts   INTEGER NOT NULL,
         body BLOB    NOT NULL,
         PRIMARY KEY (name, id, seq)
-    ) WITHOUT ROWID",
+    )",
+    "CREATE INDEX IF NOT EXISTS partyline_events_by_age ON partyline_events (name, ts)",
 ];
 
 /// The tables of partyline 0.4 and earlier, which held one channel per object.
@@ -75,19 +80,33 @@ impl SqlLog {
         if !has_meta && !has_log {
             return Ok(false);
         }
-        if has_meta {
+        // A 0.4 log without its meta row never held an event: every append moved the head.
+        let legacy_epoch = if has_meta {
+            scalar(sql, "SELECT epoch FROM partyline_meta WHERE id = 1", vec![])?
+        } else {
+            None
+        };
+        if let Some(epoch) = legacy_epoch {
+            let log = SqlLog::new(sql.clone(), name, id);
+            // The same epoch means an earlier move stopped partway: finish it. Another epoch
+            // means the shared tables already hold this channel, for example after a rollback
+            // to 0.4 and a second deploy. Merging the two would mix events of two epochs, so
+            // the 0.4 channel replaces it, and clients in the other epoch get `Reset`.
+            if log.meta()?.is_some_and(|current| current.epoch != epoch) {
+                log.delete()?;
+            }
             sql.exec(
                 "INSERT OR IGNORE INTO partyline_channels (name, id, epoch, head)
                  SELECT ?, ?, epoch, head FROM partyline_meta WHERE id = 1",
                 vec![name.into(), id.into()],
             )?;
-        }
-        if has_log {
-            sql.exec(
-                "INSERT OR IGNORE INTO partyline_events (name, id, seq, ts, body)
-                 SELECT ?, ?, seq, ts, body FROM partyline_log",
-                vec![name.into(), id.into()],
-            )?;
+            if has_log {
+                sql.exec(
+                    "INSERT OR IGNORE INTO partyline_events (name, id, seq, ts, body)
+                     SELECT ?, ?, seq, ts, body FROM partyline_log",
+                    vec![name.into(), id.into()],
+                )?;
+            }
         }
         sql.exec("DROP TABLE IF EXISTS partyline_log", None)?;
         sql.exec("DROP TABLE IF EXISTS partyline_meta", None)?;
@@ -106,6 +125,12 @@ impl SqlLog {
 
     /// Wipes the log and starts a new epoch. Old cursors no longer match.
     pub fn reset(&self) -> worker::Result<Cursor> {
+        self.delete()?;
+        self.head()
+    }
+
+    /// Deletes the channel's events and head. The next use starts a new epoch.
+    fn delete(&self) -> worker::Result<()> {
         self.sql.exec(
             "DELETE FROM partyline_events WHERE name = ? AND id = ?",
             self.key(),
@@ -114,7 +139,7 @@ impl SqlLog {
             "DELETE FROM partyline_channels WHERE name = ? AND id = ?",
             self.key(),
         )?;
-        self.head()
+        Ok(())
     }
 
     /// The timestamp of the oldest retained event, in milliseconds since the Unix epoch.

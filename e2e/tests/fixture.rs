@@ -449,6 +449,61 @@ async fn a_0_4_channel_is_migrated_and_clients_resume_without_reset() {
         frame(&mut ws).await,
         ServerFrame::Event { seq: 4, event: 4 }
     );
+
+    // The publish trimmed by age, and kept the migrated events: their timestamps moved too.
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(epoch, 1)), "").await;
+    hello(&mut ws).await;
+    for n in 2..=4 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_second_migration_in_another_epoch_replaces_the_channel() {
+    let Some(base) = base() else { return };
+    let id = unique("legacy-again");
+    let api = format!("/api/legacy/{}", encode_segment(&id));
+
+    // Migrated once, then published to under 0.5.
+    let first: u64 = post(&base, &format!("{api}/seed?epoch=4242"))
+        .await
+        .parse()
+        .unwrap();
+    let mut ws = open_route(&base, "legacy", &id, None, "").await;
+    hello(&mut ws).await;
+    post_body(&base, &api, "4").await;
+    assert_eq!(
+        get_text(&base, &format!("{api}/head")).await,
+        Cursor::new(first, 4).to_string()
+    );
+
+    // A rollback to 0.4 writes its tables again, in another epoch, and 0.5 migrates again.
+    let second: u64 = post(&base, &format!("{api}/seed?epoch=7777&again=1"))
+        .await
+        .parse()
+        .unwrap();
+    post(&base, &format!("{api}/remigrate")).await;
+
+    // The 0.4 channel replaced the 0.5 one, with no event of the other epoch mixed in.
+    let head = Cursor::new(second, 3);
+    assert_eq!(
+        get_text(&base, &format!("{api}/head")).await,
+        head.to_string()
+    );
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(second, 0)), "").await;
+    assert_eq!(hello(&mut ws).await, head);
+    for n in 1..=3 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+    // The channel keeps working in the new epoch.
+    let after: Cursor = post_body(&base, &api, "4").await.parse().unwrap();
+    assert_eq!(after, Cursor::new(second, 4));
 }
 
 #[tokio::test]

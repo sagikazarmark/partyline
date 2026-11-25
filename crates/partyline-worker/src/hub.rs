@@ -531,6 +531,11 @@ impl<C: Channel> Hub<C> {
     /// object is never left with half of it. The hubs must not be used again in this
     /// instance of the object: their next storage call fails. The next time the object
     /// starts, [`Hub::new`] creates empty tables.
+    ///
+    /// It leaves the object's alarm set, because deleting it would need an `await`. If
+    /// nothing else in the object uses the alarm, delete it after the block with
+    /// `storage.delete_alarm()`. Otherwise a pending trim wakes the object again, which
+    /// then holds empty tables.
     pub fn drop_tables(&self) -> worker::Result<()> {
         for ws in self.state.get_websockets() {
             let on_channel = self
