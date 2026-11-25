@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 
-use partyline::frame::{ConnectParams, PING, PONG, decode_segment};
+use partyline::frame::{ConnectParams, PING, PONG, decode_segment, encode_segment};
 use partyline::server::{self, Limits, Log, Retention, ServerError};
 use partyline::{Channel, Cursor, Mode, close, codec};
 use worker::{
@@ -13,15 +13,43 @@ use worker::{
     WebSocketPair, WebSocketRequestResponsePair,
 };
 
-use crate::sql_log::SqlLog;
+use crate::channel::{ChannelHandle, PendingSend};
+use crate::sql_log::{self, SqlLog};
 
 /// The header the Worker uses to pass socket tags to the hub: a percent-encoded JSON array.
 /// The hub ignores this header unless [`crate::Connect`] set it, because `Connect` strips it
 /// from client requests.
 pub(crate) const TAGS_HEADER: &str = "x-partyline-tags";
 
-/// The most tags a socket can carry. The runtime allows 10.
-pub(crate) const MAX_TAGS: usize = 10;
+/// The header the Worker uses to tell the hub which channel a request is for:
+/// `{name}/{id}`, each percent-encoded as a path segment, so neither contains a `/`.
+///
+/// [`crate::Connect`] and [`crate::Publisher`] set it on every request to the object, and
+/// `Connect` replaces any value a client sent. Without it, a request is for the object's
+/// own channel: the channel of the hub's type whose ID is the object's name.
+pub(crate) const CHANNEL_HEADER: &str = "x-partyline-channel";
+
+/// The value of [`CHANNEL_HEADER`] for a channel.
+pub(crate) fn encode_channel(name: &str, id: &str) -> String {
+    format!("{}/{}", encode_segment(name), encode_segment(id))
+}
+
+/// Reads [`CHANNEL_HEADER`]: `None` without the header, `Some(None)` for a malformed one.
+fn requested_channel(req: &Request) -> worker::Result<Option<Option<(String, String)>>> {
+    Ok(req.headers().get(CHANNEL_HEADER)?.map(|value| {
+        let (name, id) = value.split_once('/')?;
+        Some((decode_segment(name)?, decode_segment(id)?))
+    }))
+}
+
+/// The most tags a socket can carry, as the runtime allows.
+const RUNTIME_MAX_TAGS: usize = 10;
+
+/// The most tags the app can give a socket: the hub uses one for the socket's channel.
+pub(crate) const MAX_TAGS: usize = RUNTIME_MAX_TAGS - 1;
+
+/// The prefix of the hub's channel tags. App tags cannot start with it.
+pub(crate) const RESERVED_TAG_PREFIX: &str = "partyline:";
 
 /// The longest tag, in UTF-16 code units, as the runtime counts.
 const MAX_TAG_LEN: usize = 256;
@@ -112,6 +140,14 @@ impl HubConfig {
 /// awaits, for each event, then calls [`Hub::schedule_trim`] once. The state change and the
 /// events then commit together, and no other request runs in between.
 ///
+/// # Several channels
+///
+/// A hub serves every channel of its type in the object. [`Hub::publish`], [`Hub::head`],
+/// and [`Hub::reset`] act on the object's own channel, whose ID is the object's name.
+/// [`Hub::channel`] reaches any other channel, such as a private view per player in the
+/// game's object. For channels of another type, create a second hub with [`Hub::sibling`],
+/// and route each request to its hub with [`Hub::handles`].
+///
 /// # Alarms
 ///
 /// A Durable Object has one alarm. The hub uses it for age-based trimming in [`Mode::Log`].
@@ -135,11 +171,24 @@ impl<C: Channel> std::fmt::Debug for Hub<C> {
 }
 
 impl<C: Channel> Hub<C> {
-    /// Creates the hub. Runs the two `CREATE TABLE IF NOT EXISTS` statements and registers
-    /// the `ping`/`pong` auto-response, so heartbeats do not wake the Durable Object.
+    /// Creates the hub. Creates partyline's tables if they do not exist, moves a 0.4 channel
+    /// into them if there is one, and registers the `ping`/`pong` auto-response, so
+    /// heartbeats do not wake the Durable Object.
+    ///
+    /// # Upgrading from partyline 0.4
+    ///
+    /// partyline 0.4 kept one channel per object, in tables of its own. The first hub
+    /// created in such an object moves that channel into the shared tables, as the channel
+    /// of this hub's type whose ID is the object's name. That is the channel the object held
+    /// in 0.4, so clients resume from their cursors without `Reset`. In an object that
+    /// embeds several hubs, create the hub of the channel type it held in 0.4 first.
     pub fn new(state: State, config: HubConfig) -> Self {
-        if let Err(e) = SqlLog::init(&state.storage().sql()) {
+        let sql = state.storage().sql();
+        if let Err(e) = SqlLog::init(&sql) {
             worker::console_error!("partyline: creating tables failed: {e}");
+        }
+        if let Err(e) = SqlLog::migrate_legacy(&sql, C::NAME, &own_id(&state)) {
+            worker::console_error!("partyline: migrating 0.4 tables failed: {e}");
         }
         match WebSocketRequestResponsePair::new(PING, PONG) {
             Ok(pair) => state.set_websocket_auto_response(&pair),
@@ -152,25 +201,80 @@ impl<C: Channel> Hub<C> {
         }
     }
 
+    /// Creates a hub for another channel type in the same object.
+    ///
+    /// An object that holds channels of several types has one hub per type. [`Hub::new`]
+    /// takes the object's state, so create the first hub with it and the others from that
+    /// hub:
+    ///
+    /// ```ignore
+    /// fn new(state: State, _env: Env) -> Self {
+    ///     let market = Hub::new(state, HubConfig::default().retain_for(None));
+    ///     let seats = market.sibling(HubConfig::default());
+    ///     Self { market, seats }
+    /// }
+    /// ```
+    ///
+    /// When upgrading an object from partyline 0.4, create the hub of the channel type it
+    /// held then with [`Hub::new`], so that it migrates the old channel.
+    ///
+    /// # Panics
+    ///
+    /// If both channel types have the same `NAME`. Their channels would share logs and
+    /// sockets, so this is a mistake in the object's code.
+    pub fn sibling<D: Channel>(&self, config: HubConfig) -> Hub<D> {
+        use worker::wasm_bindgen::{JsCast, JsValue};
+        assert_ne!(
+            C::NAME,
+            D::NAME,
+            "two hubs in one object must have channel types with different names"
+        );
+        // A second handle on the same JavaScript object.
+        let raw: &JsValue = self.state.as_raw().as_ref();
+        let raw = raw
+            .clone()
+            .unchecked_into::<worker::worker_sys::DurableObjectState>();
+        Hub::new(State::from(raw), config)
+    }
+
     /// The Durable Object state.
     pub fn state(&self) -> &State {
         &self.state
     }
 
-    /// The event log.
-    pub fn log(&self) -> SqlLog {
-        SqlLog::new(self.state.storage().sql())
+    fn own_id(&self) -> String {
+        own_id(&self.state)
     }
 
-    /// Handles a request to the Durable Object.
+    /// The event log of the object's own channel.
+    pub fn log(&self) -> SqlLog {
+        self.log_of(&self.own_id())
+    }
+
+    pub(crate) fn log_of(&self, id: &str) -> SqlLog {
+        SqlLog::new(self.state.storage().sql(), C::NAME, id)
+    }
+
+    /// Handles a request to the Durable Object, for the channel the request names.
+    ///
+    /// [`crate::Connect`] and [`crate::Publisher`] name the channel in a header. A request
+    /// without it is for the object's own channel, whose ID is the object's name. A request
+    /// for another channel type gets 404.
+    ///
+    /// # Security
+    ///
+    /// The hub trusts the `x-partyline-channel` and `x-partyline-tags` headers. `Connect`
+    /// replaces any that a client sent. Forward client upgrades with `Connect` only: a
+    /// forward written by hand passes the client's headers on, so a client could pick the
+    /// channel it joins, such as another player's private view, or tag its own socket.
     ///
     /// | Request | Action |
     /// | --- | --- |
     /// | `GET` with `Upgrade: websocket` | Accept the socket, send `Hello`, then replay, send latest, or reset |
     /// | `POST /publish` | Append, trim, fan out, return the new cursor |
     /// | `GET /head` | Return the current cursor |
-    /// | `POST /close?tag=..&code=..` | Close sockets with a tag and close code |
-    /// | `POST /reset` | Wipe the log, start a new epoch, close every socket with 1012 |
+    /// | `POST /close?tag=..&code=..` | Close the channel's sockets that have a tag, with a close code |
+    /// | `POST /reset` | Wipe the log, start a new epoch, close the channel's sockets with 1012 |
     pub async fn fetch(&self, req: Request) -> worker::Result<Response> {
         self.fetch_with(req, |_| Ok(())).await
     }
@@ -187,13 +291,41 @@ impl<C: Channel> Hub<C> {
     ///     self.hub.fetch_with(req, |event| self.apply(event)).await
     /// }
     /// ```
+    ///
+    /// A hub with several channels uses [`Hub::fetch_with_channel`], which also passes the
+    /// channel ID.
     pub async fn fetch_with(
         &self,
-        mut req: Request,
+        req: Request,
         on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
     ) -> worker::Result<Response> {
+        self.fetch_with_channel(req, |_, event| on_publish(event))
+            .await
+    }
+
+    /// Like [`Hub::fetch_with`], but calls `on_publish` with the ID of the channel the event
+    /// is for too, so a hub with several channels can apply the event to the right state.
+    ///
+    /// ```ignore
+    /// self.seats
+    ///     .fetch_with_channel(req, |seat_id, view| self.store_view(seat_id, view))
+    ///     .await
+    /// ```
+    pub async fn fetch_with_channel(
+        &self,
+        mut req: Request,
+        on_publish: impl FnOnce(&str, &C::Event) -> worker::Result<()>,
+    ) -> worker::Result<Response> {
+        let id = match requested_channel(&req)? {
+            Some(Some((name, id))) if name == C::NAME => id,
+            Some(Some((name, _))) => {
+                return Response::error(format!("this hub holds no `{name}` channels"), 404);
+            }
+            Some(None) => return Response::error(format!("malformed {CHANNEL_HEADER}"), 400),
+            None => self.own_id(),
+        };
         if is_upgrade(&req) {
-            return self.accept(&req);
+            return self.accept(&id, &req);
         }
         let url = req.url()?;
         match (req.method(), url.path()) {
@@ -205,14 +337,14 @@ impl<C: Channel> Hub<C> {
                         413,
                     );
                 };
-                match self.publish_raw(&body, on_publish).await {
+                match self.publish_raw(&id, &body, on_publish).await {
                     Ok(cursor) => Response::ok(cursor.to_string()),
                     Err(PublishError::Invalid(e)) => Response::error(e, 400),
                     Err(PublishError::TooLarge(e)) => Response::error(e, 413),
                     Err(PublishError::Worker(e)) => Err(e),
                 }
             }
-            (Method::Get, "/head") => Response::ok(self.head()?.to_string()),
+            (Method::Get, "/head") => Response::ok(self.log_of(&id).head()?.to_string()),
             (Method::Post, "/close") => {
                 let mut tag = None;
                 let mut code = close::FORBIDDEN;
@@ -226,9 +358,9 @@ impl<C: Channel> Hub<C> {
                 let Some(tag) = tag else {
                     return Response::error("missing tag", 400);
                 };
-                Response::ok(self.close_tagged(&tag, code).to_string())
+                Response::ok(self.close_tagged_on(&id, &tag, code).to_string())
             }
-            (Method::Post, "/reset") => Response::ok(self.reset()?.to_string()),
+            (Method::Post, "/reset") => Response::ok(self.reset_channel(&id)?.to_string()),
             _ => Response::error("Not Found", 404),
         }
     }
@@ -237,7 +369,7 @@ impl<C: Channel> Hub<C> {
     ///
     /// Accepting the socket, reading the log, and sending the handshake frames run without
     /// awaiting, so no publish can land between the replay and live events.
-    fn accept(&self, req: &Request) -> worker::Result<Response> {
+    fn accept(&self, id: &str, req: &Request) -> worker::Result<Response> {
         let url = req.url()?;
         let pair = WebSocketPair::new()?;
         let params = match ConnectParams::parse(url.query().unwrap_or("")) {
@@ -256,8 +388,9 @@ impl<C: Channel> Hub<C> {
             .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
             .unwrap_or_default();
         // `Connect` validates tags. An invalid one would make the runtime throw, which
-        // aborts the Durable Object, so drop any that slip through.
-        let tags: Vec<&str> = tags
+        // aborts the Durable Object, and a reserved one could join another channel, so drop
+        // any that slip through.
+        let mut tags: Vec<&str> = tags
             .iter()
             .map(String::as_str)
             .filter(|tag| match check_tag(tag) {
@@ -269,10 +402,12 @@ impl<C: Channel> Hub<C> {
             })
             .take(MAX_TAGS)
             .collect();
+        let channel = channel_tag(C::NAME, id);
+        tags.push(&channel);
         self.state.accept_websocket_with_tags(&pair.server, &tags);
 
         let limits = self.config.limits();
-        match server::handshake_with(C::MODE, params.cursor, &self.log(), &limits) {
+        match server::handshake_with(C::MODE, params.cursor, &self.log_of(id), &limits) {
             Ok(frames) => {
                 for frame in frames {
                     if let Err(e) = pair.server.send_with_str(frame) {
@@ -295,40 +430,65 @@ impl<C: Channel> Hub<C> {
         Response::from_websocket(pair.client)
     }
 
-    /// Publishes an event to every socket and returns the new head.
+    /// A handle on the channel of this hub's type with this ID, in this object.
     ///
-    /// This is [`Hub::publish_now`] followed by [`Hub::schedule_trim`]. To publish several
-    /// events in one turn, call `publish_now` for each, then `schedule_trim` once.
-    pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
-        let head = self.publish_now(event)?;
-        self.schedule_trim().await?;
-        Ok(head)
+    /// An object that holds several channels of one type, such as a private view per player,
+    /// publishes to each through its handle:
+    ///
+    /// ```ignore
+    /// self.seats.channel(&seat_id).publish_now(&view)?;
+    /// ```
+    pub fn channel(&self, id: impl Into<String>) -> ChannelHandle<'_, C> {
+        ChannelHandle::new(self, id.into())
     }
 
-    /// Publishes an event to every socket and returns the new head, without awaiting.
+    /// Whether `req` names a channel of this hub's type.
     ///
-    /// It stores the event, trims the log by count, and sends the event, all synchronously.
-    /// The object can change its own state and call `publish_now` any number of times with
-    /// no `await` in between. The Durable Object then commits all of those writes together,
-    /// and its output gate holds the sent events until the writes are stored.
+    /// An object that embeds several hubs uses it to route each request to its hub. Every
+    /// request from [`crate::Connect`] and [`crate::Publisher`] names its channel.
     ///
-    /// It does not schedule age-based trimming. Call [`Hub::schedule_trim`] after the last
-    /// `publish_now` of the turn. Without it, an idle channel keeps expired events until
-    /// a later publish schedules the trim.
+    /// Ask the hubs before matching the object's own paths. The hubs' internal routes are
+    /// `/publish`, `/head`, `/close`, and `/reset`, so an object route on one of those paths
+    /// would otherwise catch a hub's request. A request that names no channel, or names it
+    /// in a malformed header, is for no hub in particular: after the object's own paths,
+    /// send it to one hub, whose [`Hub::fetch`] serves its own channel or answers 400.
     ///
-    /// Committing together does not make a batch all-or-nothing. An error, such as an event
-    /// over [`HubConfig::max_event_bytes`], rejects only that event: the events published
-    /// before it in the turn are already stored and sent, and so are the object's own writes.
-    /// Check each event first, or treat the events already published as sent.
+    /// ```ignore
+    /// async fn fetch(&self, req: Request) -> Result<Response> {
+    ///     if self.seats.handles(&req) {
+    ///         return self.seats.fetch(req).await;
+    ///     }
+    ///     if self.market.handles(&req) {
+    ///         return self.market.fetch_with(req, |event| self.apply(event)).await;
+    ///     }
+    ///     match req.path().as_str() {
+    ///         "/command" => self.command(req).await,
+    ///         _ => self.market.fetch(req).await,
+    ///     }
+    /// }
+    /// ```
+    pub fn handles(&self, req: &Request) -> bool {
+        matches!(requested_channel(req), Ok(Some(Some((name, _)))) if name == C::NAME)
+    }
+
+    /// The object's own channel: the one whose ID is the object's name.
+    fn own(&self) -> ChannelHandle<'_, C> {
+        self.channel(self.own_id())
+    }
+
+    /// Publishes an event on the object's own channel and returns the new head.
     ///
-    /// # Not inside a block that can roll back
+    /// See [`ChannelHandle::publish`]. The object's own channel is the one whose ID is the
+    /// object's name, as [`crate::Connect`] and [`crate::Publisher`] address it by default.
+    pub async fn publish(&self, event: &C::Event) -> worker::Result<Cursor> {
+        self.own().publish(event).await
+    }
+
+    /// Publishes an event on the object's own channel without awaiting, and returns the new
+    /// head.
     ///
-    /// Don't call `publish_now` inside a block that can roll back, such as a closure passed
-    /// to the storage's `transactionSync`. `publish_now` sends the event at once. If the
-    /// block then throws, the stored event rolls back, but the frame has already gone out.
-    /// The client then holds a sequence number that no longer exists. The next event reuses
-    /// that number, and the client drops it as a duplicate, so the event is lost with no
-    /// error. Publish after the block commits instead.
+    /// See [`ChannelHandle::publish_now`], which explains how to publish several events in
+    /// one turn, and why not to call it inside a block that can roll back.
     ///
     /// ```ignore
     /// self.apply(&command)?;
@@ -337,55 +497,60 @@ impl<C: Channel> Hub<C> {
     /// self.hub.schedule_trim().await?;
     /// ```
     pub fn publish_now(&self, event: &C::Event) -> worker::Result<Cursor> {
-        let body =
-            codec::encode_event(event).map_err(|e| worker::Error::RustError(e.to_string()))?;
-        // Clients must be able to decode what is stored. Some values encode to JSON that
-        // does not decode back, such as a NaN `f64`, which encodes as `null`.
-        codec::decode_event::<C::Event>(&body)
-            .map_err(|e| worker::Error::RustError(e.to_string()))?;
-        self.store_and_send(&body)
-            .map_err(PublishError::into_worker)
+        self.own().publish_now(event)
     }
 
     async fn publish_raw(
         &self,
+        id: &str,
         body: &[u8],
-        on_publish: impl FnOnce(&C::Event) -> worker::Result<()>,
+        on_publish: impl FnOnce(&str, &C::Event) -> worker::Result<()>,
     ) -> Result<Cursor, PublishError> {
         let limits = self.config.limits();
         server::check_size::<worker::Error>(body, &limits).map_err(PublishError::from_server)?;
         // Validate that the body is this channel's event type before storing it.
         let event = codec::decode_event::<C::Event>(body)
             .map_err(|e| PublishError::Invalid(e.to_string()))?;
-        on_publish(&event).map_err(PublishError::Worker)?;
-        let head = self.store_and_send(body)?;
+        on_publish(id, &event).map_err(PublishError::Worker)?;
+        let pending = self.append_encoded(id, body)?;
+        let head = pending.head();
+        pending.send();
         self.schedule_trim().await.map_err(PublishError::Worker)?;
         Ok(head)
     }
 
-    /// Appends an encoded event, trims the log by count, and sends the event to every
-    /// socket. It never awaits, so it lands in the same turn as the caller's own writes.
-    fn store_and_send(&self, body: &[u8]) -> Result<Cursor, PublishError> {
+    /// Appends an encoded event to a channel and trims its log, without awaiting,
+    /// and returns the frame to send to the channel's sockets.
+    pub(crate) fn append_encoded(
+        &self,
+        id: &str,
+        body: &[u8],
+    ) -> Result<PendingSend<'_>, PublishError> {
         let retention = self.config.retention(C::MODE);
         let limits = self.config.limits();
-        let (head, frame) =
-            server::publish_with(&mut self.log(), body, &retention, &limits, now_ms())
-                .map_err(PublishError::from_server)?;
-        for ws in self.state.get_websockets() {
-            if ws.send_with_str(&frame).is_err() {
-                // The client resumes from its cursor when it reconnects.
-                let _ = ws.close(Some(close::INTERNAL_ERROR), Some("send failed"));
-            }
-        }
-        Ok(head)
+        let mut log = self.log_of(id);
+        let (head, frame) = server::publish_with(&mut log, body, &retention, &limits, now_ms())
+            .map_err(PublishError::from_server)?;
+        Ok(PendingSend::new(
+            &self.state,
+            log,
+            channel_tag(C::NAME, id),
+            frame,
+            head,
+        ))
     }
 
-    /// The current head.
+    /// The current head of the object's own channel.
     pub fn head(&self) -> worker::Result<Cursor> {
-        self.log().head()
+        self.own().head()
     }
 
-    /// Closes every socket with `tag`, using `code`, and returns how many were closed.
+    /// Closes every socket in the object that carries `tag`, on every channel of every type,
+    /// using `code`, and returns how many were closed.
+    ///
+    /// Use it to remove a user from every channel the object holds, for example on sign-out.
+    /// [`ChannelHandle::close_tagged`] and [`crate::Publisher::close_tagged`] close the
+    /// sockets on one channel only.
     pub fn close_tagged(&self, tag: &str, code: u16) -> usize {
         let sockets = self.state.get_websockets_with_tag(tag);
         for ws in &sockets {
@@ -394,17 +559,64 @@ impl<C: Channel> Hub<C> {
         sockets.len()
     }
 
-    /// Wipes the log, starts a new epoch, and closes every socket with 1012.
+    /// Deletes every channel in the object, of every type: closes their sockets with 1000,
+    /// so clients do not reconnect, and drops partyline's tables. Runs synchronously.
     ///
-    /// Clients reconnect. A Log client receives `Reset`. A Latest client adopts the new
-    /// epoch, but has nothing to show until the next publish, so publish a fresh value
-    /// right after a reset.
-    pub fn reset(&self) -> worker::Result<Cursor> {
-        let head = self.log().reset()?;
+    /// Use it when the object deletes its own data, in the same synchronous block, so the
+    /// object is never left with half of it. The hubs must not be used again in this
+    /// instance of the object: their next storage call fails. The next time the object
+    /// starts, [`Hub::new`] creates empty tables.
+    ///
+    /// It leaves the object's alarm set, because deleting it would need an `await`. If
+    /// nothing else in the object uses the alarm, delete it after the block with
+    /// `storage.delete_alarm()`. Otherwise a pending trim wakes the object again, which
+    /// then holds empty tables.
+    pub fn drop_tables(&self) -> worker::Result<()> {
         for ws in self.state.get_websockets() {
+            let on_channel = self
+                .state
+                .get_tags(&ws)
+                .iter()
+                .any(|tag| tag.starts_with(RESERVED_TAG_PREFIX));
+            if on_channel {
+                let _ = ws.close(Some(close::NORMAL), Some("channel deleted"));
+            }
+        }
+        sql_log::drop_tables(&self.state.storage().sql())
+    }
+
+    /// Wipes the log of the object's own channel, starts a new epoch, and closes the
+    /// channel's sockets with 1012. See [`ChannelHandle::reset`].
+    pub fn reset(&self) -> worker::Result<Cursor> {
+        self.own().reset()
+    }
+
+    pub(crate) fn reset_channel(&self, id: &str) -> worker::Result<Cursor> {
+        let head = self.log_of(id).reset()?;
+        for ws in self.sockets_of(id) {
             let _ = ws.close(Some(close::SERVICE_RESTART), Some("channel reset"));
         }
         Ok(head)
+    }
+
+    /// The sockets on the channel with this ID.
+    fn sockets_of(&self, id: &str) -> Vec<WebSocket> {
+        self.state
+            .get_websockets_with_tag(&channel_tag(C::NAME, id))
+    }
+
+    /// Closes the sockets on the channel with this ID that carry `tag`.
+    pub(crate) fn close_tagged_on(&self, id: &str, tag: &str, code: u16) -> usize {
+        let channel = channel_tag(C::NAME, id);
+        let mut closed = 0;
+        // The runtime looks up one tag at a time, so filter by the channel's tag.
+        for ws in self.state.get_websockets_with_tag(tag) {
+            if self.state.get_tags(&ws).contains(&channel) {
+                let _ = ws.close(Some(code), Some("closed by server"));
+                closed += 1;
+            }
+        }
+        closed
     }
 
     /// Handles a message from a client. The auto-response normally answers `ping` without
@@ -449,11 +661,18 @@ impl<C: Channel> Hub<C> {
 
     /// Runs age-based trimming, so idle channels are trimmed too, and schedules the next run.
     ///
-    /// Call it from the object's `alarm` handler on every alarm, even one the object set
-    /// for itself. It does nothing when no event has expired.
+    /// It trims every channel of this hub's type in the object. Call it from the object's
+    /// `alarm` handler on every alarm, even one the object set for itself. It does nothing
+    /// when no event has expired.
     pub async fn on_alarm(&self) -> worker::Result<Response> {
         let retention = self.config.retention(C::MODE);
-        self.log().trim(&retention, now_ms())?;
+        let now = now_ms();
+        if let Some(cutoff) = retention.age_cutoff(now) {
+            let sql = self.state.storage().sql();
+            for id in sql_log::ids_with_events_before(&sql, C::NAME, cutoff)? {
+                self.log_of(&id).trim(&retention, now)?;
+            }
+        }
         self.schedule_trim().await?;
         Response::ok("")
     }
@@ -477,16 +696,16 @@ impl<C: Channel> Hub<C> {
     /// Schedules the alarm for when the oldest retained event expires, so age-based
     /// trimming runs even if the channel goes idle.
     ///
-    /// It does nothing in [`Mode::Latest`], when retention has no age limit, or when the
-    /// log is empty. [`Hub::publish`] and [`Hub::fetch`] call it for you. After
-    /// [`Hub::publish_now`], call it yourself, once after the last publish of the turn.
-    /// Calling it more often is harmless: like [`Hub::schedule_alarm`], it never pushes an
-    /// earlier alarm back.
+    /// It covers every channel of this hub's type in the object. It does nothing in
+    /// [`Mode::Latest`], when retention has no age limit, or when no event is retained.
+    /// [`Hub::publish`] and [`Hub::fetch`] call it for you. After [`Hub::publish_now`], call
+    /// it yourself, once after the last publish of the turn. Calling it more often is
+    /// harmless: like [`Hub::schedule_alarm`], it never pushes an earlier alarm back.
     pub async fn schedule_trim(&self) -> worker::Result<()> {
         let Some(max_age) = self.config.retention(C::MODE).max_age else {
             return Ok(());
         };
-        let Some(oldest) = self.log().oldest_ts()? else {
+        let Some(oldest) = sql_log::oldest_ts_of(&self.state.storage().sql(), C::NAME)? else {
             return Ok(());
         };
         self.schedule_alarm(oldest + max_age.as_millis() as u64 + 1)
@@ -494,7 +713,7 @@ impl<C: Channel> Hub<C> {
     }
 }
 
-enum PublishError {
+pub(crate) enum PublishError {
     Invalid(String),
     TooLarge(String),
     Worker(worker::Error),
@@ -511,7 +730,7 @@ impl PublishError {
         }
     }
 
-    fn into_worker(self) -> worker::Error {
+    pub(crate) fn into_worker(self) -> worker::Error {
         match self {
             Self::Invalid(e) | Self::TooLarge(e) => worker::Error::RustError(e),
             Self::Worker(e) => e,
@@ -554,7 +773,35 @@ pub(crate) fn check_tag(tag: &str) -> Result<(), String> {
             "a socket tag must be at most {MAX_TAG_LEN} characters"
         ));
     }
+    if tag.starts_with(RESERVED_TAG_PREFIX) {
+        return Err(format!(
+            "socket tags starting with `{RESERVED_TAG_PREFIX}` are reserved for partyline"
+        ));
+    }
     Ok(())
+}
+
+/// The tag of every socket on the channel with this name and ID: the reserved prefix and the
+/// hex SHA-256 of the name and ID, 74 characters in all.
+///
+/// A hash keeps the tag under the runtime's length limit for any ID. Channels must never
+/// share a tag, because a socket receives every event sent to its tag, so the hash must
+/// resist collisions. The name goes first with its length, so that no two pairs give the
+/// same input.
+pub(crate) fn channel_tag(name: &str, id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let mut hasher = Sha256::new();
+    hasher.update((name.len() as u64).to_be_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(id.as_bytes());
+    let mut tag = String::with_capacity(RESERVED_TAG_PREFIX.len() + 64);
+    tag.push_str(RESERVED_TAG_PREFIX);
+    for byte in hasher.finalize() {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag
 }
 
 /// Shortens a close reason to the 123 bytes the protocol allows, at a character boundary.
@@ -576,6 +823,14 @@ pub(crate) fn is_upgrade(req: &Request) -> bool {
         .ok()
         .flatten()
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+/// The ID of the object's own channel: the object's name, as `Connect` and `Publisher`
+/// address it by default. An object made without a name, such as from a unique ID, uses its
+/// hex ID instead, so it still has a channel of its own.
+fn own_id(state: &State) -> String {
+    let id = state.id();
+    id.name().unwrap_or_else(|| id.to_string())
 }
 
 fn now_ms() -> u64 {
@@ -602,5 +857,29 @@ mod tests {
         assert!(check_tag("").is_err());
         assert!(check_tag(&"日".repeat(256)).is_ok());
         assert!(check_tag(&"a".repeat(257)).is_err());
+        assert!(check_tag("partyline:x").is_err(), "the prefix is reserved");
+        assert!(check_tag("partyline").is_ok());
+    }
+
+    #[test]
+    fn channel_tags_are_fixed_length_and_distinct() {
+        let tag = channel_tag("seat", &"x".repeat(10_000));
+        assert_eq!(tag.len(), 74);
+        assert!(tag.starts_with(RESERVED_TAG_PREFIX));
+        assert_eq!(tag, channel_tag("seat", &"x".repeat(10_000)));
+        // The length prefix keeps a shifted boundary from colliding.
+        assert_ne!(channel_tag("ab", "c"), channel_tag("a", "bc"));
+        assert_ne!(channel_tag("seat", "1"), channel_tag("seat", "2"));
+        assert_ne!(channel_tag("seat", "1"), channel_tag("market", "1"));
+        // An app tag can never equal a channel tag.
+        assert!(check_tag(&tag).is_err());
+    }
+
+    #[test]
+    fn app_tags_leave_room_for_the_channel_tag() {
+        // The runtime throws on an eleventh tag, which aborts the object and drops every
+        // socket on every channel.
+        assert_eq!(RUNTIME_MAX_TAGS, 10);
+        assert_eq!(MAX_TAGS + 1, RUNTIME_MAX_TAGS);
     }
 }

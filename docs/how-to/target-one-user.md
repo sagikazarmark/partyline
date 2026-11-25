@@ -17,7 +17,9 @@ impl Channel for Inbox {
 }
 ```
 
-The channel ID is the user ID. Each user is one Durable Object.
+The channel ID is the user ID. By default each user is one Durable Object.
+
+When another object owns the state the user sees, such as a game that owns every player's portfolio, keep the per-user channels in that object instead. It can then change its state and publish to each user's channel in one turn. See [Several channels in one object](several-channels-in-one-object.md).
 
 ## 2. Allow only that user to connect
 
@@ -63,11 +65,13 @@ Publisher::<Inbox>::new(&env, "INBOX_CHANNEL")?
 ```
 
 The first argument is the channel ID, the second the tag.
-`close_tagged` works on one channel. Close the user's sockets on every channel you know they have open. Any other socket ends at its next reconnect, when authorization fails.
+`Publisher::close_tagged` works on one channel. Close the user's sockets on every channel you know they have open. Any other socket ends at its next reconnect, when authorization fails.
+
+In an object that holds several channels, `Hub::close_tagged(&user_id, close::FORBIDDEN)` closes the user's sockets on every channel in the object at once.
 
 ## Tags
 
-A socket carries at most 10 tags. Each tag must be non-empty and at most 256 characters. `Connect::forward` returns an error for a tag that breaks these rules.
+A socket carries at most 9 tags: the runtime allows 10, and the hub uses one for the socket's channel. Each tag must be non-empty, at most 256 characters, and must not start with `partyline:`, which the hub reserves. `Connect::forward` returns an error for a tag that breaks these rules.
 Tags can hold any Unicode text. `Connect` percent-encodes them on the way to the Durable Object.
 
 Tags are useful on shared channels too: tag each socket with the user ID, and `close_tagged` removes one user from a shared channel.

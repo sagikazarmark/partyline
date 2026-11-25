@@ -20,6 +20,7 @@ Each guide solves one task. They assume you have finished the tutorial or read [
 | [Load, then subscribe](how-to/load-then-subscribe.md) | Load initial state and subscribe without losing an event in between |
 | [Authenticate with Clerk](how-to/authenticate-with-clerk.md) | Let only signed-in users open a socket, and close their sockets on sign-out |
 | [Target one user](how-to/target-one-user.md) | Send events to one user only |
+| [Several channels in one object](how-to/several-channels-in-one-object.md) | Publish to a shared feed and private views in the same turn as the state change. Also covers upgrading from 0.4 |
 | [Share the alarm](how-to/share-the-alarm.md) | Use the Durable Object's alarm for your own work next to the hub |
 | [Use with axum](how-to/use-with-axum.md) | Route upgrades and publish from an axum router on Workers |
 | [Evolve event types](how-to/evolve-event-types.md) | Change an event type without breaking clients that are still open |

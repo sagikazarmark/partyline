@@ -6,7 +6,7 @@ This page lists every limit that applies to a partyline channel, where it comes 
 
 | Limit | Value | Set by | Past the limit |
 | --- | --- | --- | --- |
-| WebSocket connections | 32,768 per Durable Object | Cloudflare | The upgrade fails. A channel that could grow this large needs sharding, which partyline does not provide |
+| WebSocket connections | 32,768 per Durable Object, shared by every channel in the object | Cloudflare | The upgrade fails. A channel that could grow this large needs sharding, which partyline does not provide |
 | Event size | 64 KiB encoded, by default | `HubConfig::max_event_bytes` | The hub answers HTTP 413, and `Publisher::publish` and `Hub::publish` return an error. Nothing is stored or sent |
 | Replay size | 8 MiB of events per reconnect, by default | `HubConfig::max_replay_bytes` | The client gets `Reset` instead of the replay, and refetches |
 | Retention, Log mode | 1,000 events or 24 hours, whichever is smaller | `HubConfig::retain_events`, `HubConfig::retain_for` | Older events are trimmed. A client whose cursor is older gets `Reset` |
@@ -39,7 +39,8 @@ partyline_worker::channel_object! {
 
 | Limit | Value | Set by | Past the limit |
 | --- | --- | --- | --- |
-| Tags | At most 10 per socket | Cloudflare | `Connect::forward` returns an error |
+| Tags | At most 9 per socket. Cloudflare allows 10, and the hub uses one for the socket's channel | Cloudflare and partyline | `Connect::forward` returns an error |
+| Reserved tags | Tags that start with `partyline:` | partyline | `Connect::forward` returns an error |
 | Tag length | 1 to 256 characters | Cloudflare | `Connect::forward` returns an error |
 | Attachment | 2,048 bytes | Cloudflare | The hub uses no attachment. Your own per-socket data must fit |
 | Close reason | 123 bytes | The WebSocket protocol | The hub and `reject` cut longer reasons at a character boundary |
@@ -64,6 +65,19 @@ The runtime reports 1005, 1006, and 1015 when a client goes away without a close
 | Heartbeat timeout after a wake | 3 s | `wake_timeout` |
 
 With the defaults, a client finds a dead socket within 35 s without a wake signal. Native targets have no wake source, so this is their worst case.
+
+## Several channels in one object
+
+An object that holds several channels shares its limits between them: its 32,768 sockets, its 128 MB of memory, its storage, and its throughput, because it runs one request at a time.
+Each channel keeps its own retention, replay budget, epoch, and head.
+
+Storage grows with the number of channels. As a rule of thumb:
+
+- A Latest channel stores one event.
+- A Log channel stores at most `retain_events` events. With the default of 1,000 and events of 16 KB, that is about 16 MB.
+
+So a game with 200 Latest views and one Log feed stores little more than the feed. Sockets and throughput are usually the tighter limits.
+See [Several channels in one object](../how-to/several-channels-in-one-object.md).
 
 ## Durable Object limits that matter
 

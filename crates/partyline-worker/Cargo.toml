@@ -17,6 +17,7 @@ http = ["worker/http", "dep:http", "dep:http-body", "dep:bytes"]
 futures.workspace = true
 partyline.workspace = true
 serde_json.workspace = true
+sha2 = "0.11"
 worker.workspace = true
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }

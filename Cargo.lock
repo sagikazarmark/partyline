@@ -2294,6 +2294,7 @@ dependencies = [
  "http-body",
  "partyline",
  "serde_json",
+ "sha2",
  "worker",
 ]
 

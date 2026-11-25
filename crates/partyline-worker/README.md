@@ -6,9 +6,9 @@
 > partyline is inspired by [PartyKit](https://www.partykit.io/) but is not a port. It is not affiliated with Cloudflare or PartyKit, and is not wire-compatible with PartyServer or partysocket.
 
 The Cloudflare Durable Object hub of [partyline](https://github.com/sagikazarmark/partyline).
-Each channel ID is one Durable Object that owns the sockets and the event log.
+By default each channel ID is one Durable Object that owns the sockets and the event log. One object can also hold several channels, so it can change its state and publish to all of them in one turn.
 
-- **`Hub`**: embed it in your own Durable Object, or generate the object with `channel_object!`.
+- **`Hub`**: embed it in your own Durable Object, or generate the object with `channel_object!`. `Hub::channel` reaches one of several channels in the object.
 - **`Connect`**: forward a client's WebSocket upgrade from the Worker.
 - **`Publisher`**: publish, read the head, close sockets by tag, and reset a channel.
 - **`reject`**: refuse an upgrade with a close code, such as 4401 or 4403.
@@ -99,7 +99,7 @@ Publisher::<Orders>::new(&env, "ORDER_CHANNEL")?
 
 `Connect::forward` removes the `token` query parameter before it forwards the upgrade, so tokens stay out of the Durable Object's request logs.
 One Durable Object accepts at most 32,768 WebSocket connections.
-A socket carries at most 10 tags of at most 256 characters each.
+A socket carries at most 9 app tags of at most 256 characters each. The hub adds a tenth for the socket's channel, and reserves the prefix `partyline:`.
 
 ## License
 

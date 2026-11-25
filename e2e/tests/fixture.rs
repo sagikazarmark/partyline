@@ -61,10 +61,36 @@ async fn open(base: &str, id: &str, cursor: Option<Cursor>) -> Socket {
 
 /// Opens a socket with extra query parameters, such as `&user=alice`.
 async fn open_with(base: &str, id: &str, cursor: Option<Cursor>, extra: &str) -> Socket {
+    open_route(base, "ticks", id, cursor, extra).await
+}
+
+/// Opens a socket on one of the fixture's upgrade routes, `/partyline/{route}/{id}`.
+async fn open_route(
+    base: &str,
+    route: &str,
+    id: &str,
+    cursor: Option<Cursor>,
+    extra: &str,
+) -> Socket {
     let ws_base = BaseUrl::Explicit(base.to_owned()).resolve().unwrap();
     let query = ConnectParams::new(cursor, None).to_query();
-    let url = format!("{ws_base}{}?{query}{extra}", connect_path("ticks", id));
+    let url = format!("{ws_base}{}?{query}{extra}", connect_path(route, id));
     tokio_tungstenite::connect_async(url).await.unwrap().0
+}
+
+/// Posts a body to the fixture and returns the text of the response.
+async fn post_body(base: &str, path: &str, body: &str) -> String {
+    reqwest::Client::new()
+        .post(format!("{base}{path}"))
+        .body(body.to_owned())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
 }
 
 async fn frame(ws: &mut Socket) -> ServerFrame<u64> {
@@ -386,4 +412,555 @@ async fn non_ascii_tags_work_and_invalid_tags_are_refused() {
     let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
     let url = format!("{ws_base}{}?v=1&user=", connect_path("ticks", &id));
     assert!(tokio_tungstenite::connect_async(url).await.is_err());
+}
+
+#[tokio::test]
+async fn a_0_4_channel_is_migrated_and_clients_resume_without_reset() {
+    let Some(base) = base() else { return };
+    let id = unique("legacy");
+    let api = format!("/api/legacy/{}", encode_segment(&id));
+
+    // The object holds a 0.4 channel at seq 3, and its hub does not exist yet.
+    let epoch: u64 = post(&base, &format!("{api}/seed")).await.parse().unwrap();
+    assert_eq!(
+        get_text(&base, &format!("{api}/tables")).await,
+        "partyline_log,partyline_meta"
+    );
+
+    // A client that saw event 1 under 0.4 resumes from its cursor. Connecting creates the
+    // hub, which migrates the channel.
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(epoch, 1)), "").await;
+    assert_eq!(hello(&mut ws).await, Cursor::new(epoch, 3));
+    for n in 2..=3 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+    assert_eq!(
+        get_text(&base, &format!("{api}/tables")).await,
+        "partyline_channels,partyline_events"
+    );
+
+    // The channel continues in the same epoch.
+    let head: Cursor = post_body(&base, &api, "4").await.parse().unwrap();
+    assert_eq!(head, Cursor::new(epoch, 4));
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 4, event: 4 }
+    );
+
+    // The publish trimmed by age, and kept the migrated events: their timestamps moved too.
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(epoch, 1)), "").await;
+    hello(&mut ws).await;
+    for n in 2..=4 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_second_migration_in_another_epoch_replaces_the_channel() {
+    let Some(base) = base() else { return };
+    let id = unique("legacy-again");
+    let api = format!("/api/legacy/{}", encode_segment(&id));
+
+    // Migrated once, then published to under 0.5.
+    let first: u64 = post(&base, &format!("{api}/seed?epoch=4242"))
+        .await
+        .parse()
+        .unwrap();
+    let mut ws = open_route(&base, "legacy", &id, None, "").await;
+    hello(&mut ws).await;
+    post_body(&base, &api, "4").await;
+    assert_eq!(
+        get_text(&base, &format!("{api}/head")).await,
+        Cursor::new(first, 4).to_string()
+    );
+
+    // A rollback to 0.4 writes its tables again, in another epoch, and 0.5 migrates again.
+    let second: u64 = post(&base, &format!("{api}/seed?epoch=7777&again=1"))
+        .await
+        .parse()
+        .unwrap();
+    post(&base, &format!("{api}/remigrate")).await;
+
+    // The 0.4 channel replaced the 0.5 one, with no event of the other epoch mixed in.
+    let head = Cursor::new(second, 3);
+    assert_eq!(
+        get_text(&base, &format!("{api}/head")).await,
+        head.to_string()
+    );
+    let mut ws = open_route(&base, "legacy", &id, Some(Cursor::new(second, 0)), "").await;
+    assert_eq!(hello(&mut ws).await, head);
+    for n in 1..=3 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+    // The channel keeps working in the new epoch.
+    let after: Cursor = post_body(&base, &api, "4").await.parse().unwrap();
+    assert_eq!(after, Cursor::new(second, 4));
+}
+
+#[tokio::test]
+async fn reserved_tags_are_refused() {
+    let Some(base) = base() else { return };
+    let id = unique("tags-reserved");
+    // A tag with the hub's prefix could join another channel, so `Connect` refuses it.
+    let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
+    let url = format!(
+        "{ws_base}{}?v=1&user={}",
+        connect_path("ticks", &id),
+        encode_segment("partyline:x")
+    );
+    assert!(tokio_tungstenite::connect_async(url).await.is_err());
+}
+
+#[tokio::test]
+async fn channels_in_one_object_are_independent() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let (a, b) = (unique("a"), unique("b"));
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    let mut ws_b = open_with(&base, &b, None, &in_room).await;
+    let head_a = hello(&mut ws_a).await;
+    let head_b = hello(&mut ws_b).await;
+    assert_ne!(head_a.epoch, head_b.epoch, "each channel has its own epoch");
+
+    let path = |id: &str| {
+        format!(
+            "/api/ticks/{}?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+    let after_a: Cursor = post_body(&base, &path(&a), "10").await.parse().unwrap();
+    let after_b: Cursor = post_body(&base, &path(&b), "20").await.parse().unwrap();
+    assert_eq!(after_a, Cursor::new(head_a.epoch, 1));
+    assert_eq!(after_b, Cursor::new(head_b.epoch, 1));
+
+    // Each socket gets only its own channel's event.
+    assert_eq!(
+        frame(&mut ws_a).await,
+        ServerFrame::Event { seq: 1, event: 10 }
+    );
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 1, event: 20 }
+    );
+    let head = |id: &str| {
+        format!(
+            "/api/ticks/{}/head?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+    assert_eq!(get_text(&base, &head(&a)).await, after_a.to_string());
+    assert_eq!(get_text(&base, &head(&b)).await, after_b.to_string());
+}
+
+#[tokio::test]
+async fn close_and_reset_act_on_one_channel_in_an_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let (a, b) = (unique("a"), unique("b"));
+    let in_room = format!("&room={}&user=alice", encode_segment(&room));
+    let api = |id: &str, action: &str| {
+        format!(
+            "/api/ticks/{}{action}?room={}",
+            encode_segment(id),
+            encode_segment(&room)
+        )
+    };
+
+    // Alice has a socket on each channel. Closing her on channel a leaves channel b open.
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    let mut ws_b = open_with(&base, &b, None, &in_room).await;
+    hello(&mut ws_a).await;
+    hello(&mut ws_b).await;
+    let closed = post(&base, &format!("{}&tag=alice", api(&a, "/close"))).await;
+    assert_eq!(closed, "1");
+    assert_eq!(close_code(&mut ws_a).await, Some(close::FORBIDDEN));
+    post_body(&base, &api(&b, ""), "1").await;
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+
+    // Resetting channel a closes only channel a's sockets.
+    let mut ws_a = open_with(&base, &a, None, &in_room).await;
+    hello(&mut ws_a).await;
+    post(&base, &api(&a, "/reset")).await;
+    assert_eq!(close_code(&mut ws_a).await, Some(close::SERVICE_RESTART));
+    post_body(&base, &api(&b, ""), "2").await;
+    assert_eq!(
+        frame(&mut ws_b).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+}
+
+/// Asserts that no frame arrives on the socket for a while.
+async fn assert_silent(ws: &mut Socket) {
+    let next = timeout(Duration::from_millis(500), ws.next()).await;
+    assert!(next.is_err(), "expected no frame, got {next:?}");
+}
+
+/// The fixture's room API for `room`.
+fn room_api(room: &str, action: &str) -> String {
+    format!("/api/rooms/{}{action}", encode_segment(room))
+}
+
+#[tokio::test]
+async fn hubs_of_two_types_share_an_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ticks = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &in_room).await;
+    let ticks_start = hello(&mut ticks).await;
+    let view_start = hello(&mut view).await;
+
+    // One turn stores and sends an event on each hub's channel.
+    let heads = post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:feed=1;views:alice=7",
+    )
+    .await;
+    assert_eq!(
+        heads,
+        format!(
+            "{},{}",
+            Cursor::new(ticks_start.epoch, 1),
+            Cursor::new(view_start.epoch, 1)
+        )
+    );
+    assert_eq!(
+        frame(&mut ticks).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+    assert_eq!(
+        frame(&mut view).await,
+        ServerFrame::Event { seq: 1, event: 7 }
+    );
+
+    // `Publisher` reaches the Latest hub, which `Hub::handles` picks out.
+    post_body(&base, &room_api(&room, "/views/alice"), "8").await;
+    assert_eq!(
+        frame(&mut view).await,
+        ServerFrame::Event { seq: 2, event: 8 }
+    );
+    assert_silent(&mut ticks).await;
+
+    // A Latest client that is behind gets the latest value.
+    let mut ws = open_route(
+        &base,
+        "room-views",
+        "alice",
+        Some(Cursor::new(0, 0)),
+        &in_room,
+    )
+    .await;
+    hello(&mut ws).await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 8 }
+    );
+}
+
+#[tokio::test]
+async fn appended_events_reach_sockets_only_when_sent_and_none_is_lost() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ws = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let start = hello(&mut ws).await;
+
+    // Stored, but never sent, as if the object stopped after the commit.
+    post_body(&base, &room_api(&room, "/commit?send=0"), "ticks:feed=1").await;
+    assert_silent(&mut ws).await;
+
+    // The next event is sent. The socket sees a gap, which a client resumes over.
+    post_body(&base, &room_api(&room, "/commit"), "ticks:feed=2").await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 2, event: 2 }
+    );
+
+    // Resuming from the start replays both events: the unsent one was stored.
+    let mut ws = open_route(
+        &base,
+        "room-ticks",
+        "feed",
+        Some(Cursor::new(start.epoch, 0)),
+        &in_room,
+    )
+    .await;
+    hello(&mut ws).await;
+    for n in 1..=2 {
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Event { seq: n, event: n }
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_hub_closes_a_tag_on_every_channel_in_the_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let alice = format!("&room={}&user=alice", encode_segment(&room));
+    let bob = format!("&room={}&user=bob", encode_segment(&room));
+    let mut feed = open_route(&base, "room-ticks", "feed", None, &alice).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &alice).await;
+    let mut other = open_route(&base, "room-ticks", "feed", None, &bob).await;
+    hello(&mut feed).await;
+    hello(&mut view).await;
+    hello(&mut other).await;
+
+    let closed = post(&base, &room_api(&room, "/close?tag=alice")).await;
+    assert_eq!(closed, "2");
+    assert_eq!(close_code(&mut feed).await, Some(close::FORBIDDEN));
+    assert_eq!(close_code(&mut view).await, Some(close::FORBIDDEN));
+
+    // Bob stays connected.
+    post_body(&base, &room_api(&room, "/commit"), "ticks:feed=1").await;
+    assert_eq!(
+        frame(&mut other).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+}
+
+#[tokio::test]
+async fn the_shared_alarm_trims_every_channel_in_the_object_by_age() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let heads: Vec<Cursor> = post_body(&base, &room_api(&room, "/commit"), "ticks:a=1;ticks:b=1")
+        .await
+        .split(',')
+        .map(|head| head.parse().unwrap())
+        .collect();
+
+    // The fixture keeps events for 3 seconds. Nothing is published meanwhile, so only the
+    // alarm can trim them, and it must trim both channels.
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
+    for (id, head) in ["a", "b"].into_iter().zip(heads) {
+        let mut ws = open_route(
+            &base,
+            "room-ticks",
+            id,
+            Some(Cursor::new(head.epoch, 0)),
+            &in_room,
+        )
+        .await;
+        assert_eq!(hello(&mut ws).await, head);
+        assert_eq!(
+            frame(&mut ws).await,
+            ServerFrame::Reset { head },
+            "channel {id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_tables_closes_every_channel_in_the_object() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:feed=1;views:alice=1",
+    )
+    .await;
+    let mut feed = open_route(&base, "room-ticks", "feed", None, &in_room).await;
+    let mut view = open_route(&base, "room-views", "alice", None, &in_room).await;
+    hello(&mut feed).await;
+    hello(&mut view).await;
+    // The Latest client is behind, so it gets the value first.
+    frame(&mut view).await;
+    assert_eq!(
+        get_text(&base, &room_api(&room, "/tables")).await,
+        "partyline_channels,partyline_events"
+    );
+
+    post(&base, &room_api(&room, "/drop")).await;
+    // 1000 tells the clients not to reconnect.
+    assert_eq!(close_code(&mut feed).await, Some(close::NORMAL));
+    assert_eq!(close_code(&mut view).await, Some(close::NORMAL));
+    assert_eq!(get_text(&base, &room_api(&room, "/tables")).await, "");
+}
+
+#[tokio::test]
+async fn a_client_cannot_pick_its_channel_with_a_header() {
+    use tungstenite::client::IntoClientRequest;
+
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    // The client asks for its own channel, but claims another one in the header that
+    // names the channel inside the object. `Connect` replaces it.
+    let ws_base = BaseUrl::Explicit(base.clone()).resolve().unwrap();
+    let url = format!(
+        "{ws_base}{}?v=1&room={}",
+        connect_path("room-ticks", "mine"),
+        encode_segment(&room)
+    );
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert("x-partyline-channel", "ticks/victim".parse().unwrap());
+    let mut ws = tokio_tungstenite::connect_async(req).await.unwrap().0;
+    hello(&mut ws).await;
+
+    post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:victim=1;ticks:mine=2",
+    )
+    .await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 1, event: 2 },
+        "the socket is on its own channel, not the one in the header"
+    );
+}
+
+#[tokio::test]
+async fn channels_of_two_types_can_share_an_id() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let mut ticks = open_route(&base, "room-ticks", "same", None, &in_room).await;
+    let mut view = open_route(&base, "room-views", "same", None, &in_room).await;
+    let ticks_start = hello(&mut ticks).await;
+    let view_start = hello(&mut view).await;
+    assert_ne!(ticks_start.epoch, view_start.epoch);
+
+    post_body(
+        &base,
+        &room_api(&room, "/commit"),
+        "ticks:same=1;views:same=2",
+    )
+    .await;
+    assert_eq!(
+        frame(&mut ticks).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+    assert_eq!(
+        frame(&mut view).await,
+        ServerFrame::Event { seq: 1, event: 2 }
+    );
+    assert_silent(&mut ticks).await;
+    assert_silent(&mut view).await;
+}
+
+#[tokio::test]
+async fn publisher_closes_a_tag_on_one_channel_of_an_object_with_its_own_close_route() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let alice = format!("&room={}&user=alice", encode_segment(&room));
+    let mut first = open_route(&base, "room-views", "one", None, &alice).await;
+    let mut second = open_route(&base, "room-views", "two", None, &alice).await;
+    hello(&mut first).await;
+    hello(&mut second).await;
+
+    // The room object has a `/close` route of its own, which closes across the object.
+    // `Publisher` names the channel, so its close reaches the hub instead.
+    let closed = post(&base, &room_api(&room, "/views/one/close?tag=alice")).await;
+    assert_eq!(closed, "1");
+    assert_eq!(close_code(&mut first).await, Some(close::FORBIDDEN));
+    post_body(&base, &room_api(&room, "/commit"), "views:two=5").await;
+    assert_eq!(
+        frame(&mut second).await,
+        ServerFrame::Event { seq: 1, event: 5 }
+    );
+}
+
+#[tokio::test]
+async fn a_pending_send_is_dropped_if_the_channel_was_reset_before_it() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    post_body(&base, &room_api(&room, "/commit"), "views:alice=1").await;
+
+    // Store seq 2 now, but send it only after 2 seconds, in the same request.
+    let held = tokio::spawn({
+        let (base, room) = (base.clone(), room.clone());
+        async move {
+            post_body(
+                &base,
+                &room_api(&room, "/commit?hold_ms=2000"),
+                "views:alice=9",
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Meanwhile the channel is reset, and a client connects in the new epoch.
+    post(&base, &room_api(&room, "/views/alice/reset")).await;
+    let mut ws = open_route(&base, "room-views", "alice", None, &in_room).await;
+    let head = hello(&mut ws).await;
+    assert_eq!(head.seq, 0);
+
+    // The held event belongs to the old epoch. Sending it would make the client take seq 2
+    // as current and drop the new epoch's events up to seq 2.
+    held.await.unwrap();
+    assert_silent(&mut ws).await;
+    post_body(&base, &room_api(&room, "/views/alice"), "5").await;
+    assert_eq!(
+        frame(&mut ws).await,
+        ServerFrame::Event { seq: 1, event: 5 }
+    );
+}
+
+#[tokio::test]
+async fn the_alarm_rearms_for_channels_that_expire_later_in_another_hub() {
+    let Some(base) = base() else { return };
+    let room = unique("room");
+    let in_room = format!("&room={}", encode_segment(&room));
+    let resumes = |route: &'static str, id: &'static str, head: Cursor| {
+        let (base, in_room) = (base.clone(), in_room.clone());
+        async move {
+            let mut ws =
+                open_route(&base, route, id, Some(Cursor::new(head.epoch, 0)), &in_room).await;
+            assert_eq!(hello(&mut ws).await, head);
+            frame(&mut ws).await
+        }
+    };
+
+    // The fixture keeps events for 3 seconds. A ticks event now, a beats event 2 seconds
+    // later, and nothing published after that, so only the alarm can trim them.
+    let a: Cursor = post_body(&base, &room_api(&room, "/commit"), "ticks:a=1")
+        .await
+        .parse()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let b: Cursor = post_body(&base, &room_api(&room, "/commit"), "beats:b=1")
+        .await
+        .parse()
+        .unwrap();
+
+    // At 4.5 seconds, the first alarm trimmed the ticks event only.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(
+        resumes("room-ticks", "a", a).await,
+        ServerFrame::Reset { head: a }
+    );
+    assert_eq!(
+        resumes("room-beats", "b", b).await,
+        ServerFrame::Event { seq: 1, event: 1 }
+    );
+
+    // At 6.5 seconds, the alarm it scheduled for the beats hub trimmed that event too.
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    assert_eq!(
+        resumes("room-beats", "b", b).await,
+        ServerFrame::Reset { head: b }
+    );
 }

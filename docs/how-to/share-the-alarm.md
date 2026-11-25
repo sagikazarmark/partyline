@@ -80,6 +80,13 @@ The order matters:
 Use `hub_handlers!(hub)`. It generates the three WebSocket handlers and an `alarm` that calls `self.hub.on_alarm()`.
 `channel_object!` does the same.
 
+## Objects with several hubs
+
+An object with channels of several types has one hub per type. Each hub trims its own channels, and they share the alarm through `schedule_alarm`, the same as your own work.
+
+- Without your own alarm, name every hub: `hub_handlers!(market, seats)`. Its `alarm` calls `on_alarm` on each.
+- With your own alarm, call `on_alarm` on every hub first, then do your own work.
+
 ## Related
 
 - [Limits: retention](../explanation/limits.md#retention)
